@@ -1,0 +1,15 @@
+System Information
+Timestamp,2025-04-01 11:38:47
+Model,ResNet-50
+System,Linux
+Python Version,3.11.0rc1
+PyTorch Version,2.5.0+cu124
+ONNX Runtime Version,1.21.0
+CUDA Available,True
+TensorRT Used,False
+
+Inference Time (ms),Prediction,Prediction ID,Provider,Reference Match,Runtime,Speedup vs ONNX CPU,Speedup vs PyTorch CPU,Speedup vs PyTorch GPU
+41.67,tiger cat,282,CPU,N/A (Reference),PyTorch,,,
+13.40,tiger cat,282,CPU,Yes,ONNX,,3.11x,
+3.65,tiger cat,282,CUDA,N/A (GPU Reference),PyTorch,,11.42x,
+4.48,tiger cat,282,CUDA,Yes,ONNX,2.99x,,0.81x

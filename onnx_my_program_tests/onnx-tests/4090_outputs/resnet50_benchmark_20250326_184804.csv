@@ -1,0 +1,12 @@
+System Information
+Timestamp,2025-03-26 18:48:04
+Model,ResNet-50
+System,Linux
+Python Version,3.10.12
+PyTorch Version,2.4.0a0+07cecf4168.nv24.05
+ONNX Runtime Version,1.21.0
+CUDA Available,True
+TensorRT Used,False
+
+Runtime,Provider,Inference Time (ms),Prediction,Prediction ID,Reference Match
+PyTorch,CPU,23.50,tiger cat,282,N/A (Reference)
