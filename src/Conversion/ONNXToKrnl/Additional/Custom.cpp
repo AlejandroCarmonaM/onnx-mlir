@@ -22,11 +22,18 @@ namespace onnx_mlir {
 
 struct ONNXCustomOpLowering : public OpConversionPattern<ONNXCustomOp> {
   ONNXCustomOpLowering(TypeConverter &typeConverter, MLIRContext *ctx)
-      : OpConversionPattern(typeConverter, ctx) {}
+      : OpConversionPattern(typeConverter, ctx, /*benefit=*/1) {}
 
   LogicalResult matchAndRewrite(ONNXCustomOp customOp,
       ONNXCustomOpAdaptor operandAdaptor,
       ConversionPatternRewriter &rewriter) const final {
+    // Skip FusedGemm operations so our specialized pattern can handle them
+    StringAttr funcName = customOp.getFunctionName();
+    if (funcName && funcName.getValue() == "FusedGemm") {
+      StringAttr domainName = customOp.getDomainName();
+      if (domainName && domainName.getValue() == "com.microsoft")
+        return failure();
+    }
     Operation *op = customOp.getOperation();
     Location loc = op->getLoc();
     ValueRange operands = operandAdaptor.getOperands();

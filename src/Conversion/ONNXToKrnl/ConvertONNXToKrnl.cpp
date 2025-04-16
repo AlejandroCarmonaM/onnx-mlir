@@ -23,6 +23,8 @@
 #include "src/Compiler/OptionUtils.hpp"
 #include "src/Conversion/ONNXToKrnl/ONNXToKrnlCommon.hpp"
 #include "src/Dialect/Mlir/VectorMachineSupport.hpp"
+/********************MOD FOR FUSEDGEMM**************************/
+#include "src/Conversion/ONNXToKrnl/Additional/FusedGemm.hpp"
 
 using namespace mlir;
 
@@ -283,6 +285,9 @@ void populateONNXToKrnlConversionPattern(RewritePatternSet &patterns,
   patterns.insert<ONNXEntryPointLowering>(ctx);
   // Additional
   populateLoweringONNXCustomOpPattern(patterns, typeConverter, ctx);
+  /********************MOD FOR FUSEDGEMM**************************/
+  // Add our FusedGemm pattern *after* the generic custom pattern
+  populateLoweringONNXFusedGemmOpPattern(patterns, typeConverter, ctx);
   populateLoweringONNXLayoutTransformOpPattern(patterns, typeConverter, ctx, enableParallel);
   populateLoweringONNXShapeTransformOpPattern(patterns, typeConverter, ctx);
   // clang-format on
