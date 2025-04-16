@@ -28,11 +28,9 @@ struct ONNXCustomOpLowering : public OpConversionPattern<ONNXCustomOp> {
       ONNXCustomOpAdaptor operandAdaptor,
       ConversionPatternRewriter &rewriter) const final {
     // Skip FusedGemm operations so our specialized pattern can handle them
-    StringAttr funcName = customOp.getFunctionName();
-    if (funcName && funcName.getValue() == "FusedGemm") {
-      StringAttr domainName = customOp.getDomainName();
-      if (domainName && domainName.getValue() == "com.microsoft")
-        return failure();
+    StringAttr funcNameAttr = customOp.getFunctionNameAttr();
+    if (funcNameAttr && funcNameAttr.getValue() == "FusedGemm") {
+      return failure();
     }
     Operation *op = customOp.getOperation();
     Location loc = op->getLoc();
