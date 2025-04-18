@@ -1,4 +1,3 @@
-
 # SPDX-License-Identifier: Apache-2.0
 
 if (NOT ONNX_MLIR_ENABLE_PYRUNTIME_LIGHT)
@@ -52,6 +51,8 @@ add_onnx_mlir_library(OMTensorUtils
   OMTensorList.cpp
   OMUnique.cpp
   OnnxDataType.cpp
+  # MODICATION TO INCLUDE THE FUSED GEMM CPP PLACEHOLDER
+  FusedGemmRuntime.cpp
   ${ONNX_MLIR_SRC_ROOT}/src/Support/SmallFPConversion.c
 
   DEPENDS 
