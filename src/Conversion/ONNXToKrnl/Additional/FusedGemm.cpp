@@ -14,196 +14,134 @@
 
 // build command: cmake --build . --target OMONNXToKrnl
 
+/*Current err: "root@7dca6f6f888a:~/onnx-mlir/src/matmul_relu_matmul_fashion_mnist# onnx-mlir --EmitMLIR mnist_model_cpu_optimized.onnx 
+[1/3] Fri Apr 18 15:18:44 2025 (0s) Importing ONNX Model to MLIR Module from "mnist_model_cpu_optimized.onnx"
+[2/3] Fri Apr 18 15:18:44 2025 (0s) Compiling and Optimizing MLIR Module
+onnx-mlir: /workdir/llvm-project/mlir/lib/Conversion/LLVMCommon/StructBuilder.cpp:22:
+ mlir::StructBuilder::StructBuilder(mlir::Value): Assertion
+  `LLVM::isCompatibleType(structType) && "expected llvm type"' failed.
+Aborted (core dumped)"*/
+
+
 #include "src/Conversion/ONNXToKrnl/ONNXToKrnlCommon.hpp"
 #include "src/Dialect/Krnl/KrnlHelper.hpp"
 #include "src/Dialect/ONNX/ONNXOps/ShapeHelper.hpp"
-#include "mlir/IR/Attributes.h" // Required for StringAttr, IntegerAttr
-#include "mlir/IR/Builders.h"
-#include "llvm/Support/Debug.h"
-#include "mlir/IR/Diagnostics.h" // Might be needed, often included transitively
-#include <cassert> // For assert
-
-#include "mlir/IR/TypeUtilities.h" // For getElementTypeOrSelf
-#include "mlir/Transforms/DialectConversion.h" // Required for TypeConverter, OpConversionPattern, ConversionPatternRewriter
-
-#include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
-#include "mlir/Conversion/LLVMCommon/Pattern.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/Matchers.h" // Required for matchPattern
-
-#include "src/Dialect/ONNX/ONNXOps.hpp" // Include ONNX dialect ops definition
-#include "llvm/Support/Debug.h"
-
-#define DEBUG_TYPE "onnx_to_krnl_fusedgemm"
+#include "src/Conversion/ONNXToKrnl/Additional/FusedGemm.hpp"
 
 using namespace mlir;
 
 namespace onnx_mlir {
 
-// Helper function to get or insert the LLVM declaration for the external function
-static FlatSymbolRefAttr getOrInsertExternFunc(StringRef funcName,
-    ModuleOp module, mlir::Type funcType, PatternRewriter &rewriter) {
-  auto *context = module.getContext();
-  if (auto func = module.lookupSymbol<LLVM::LLVMFuncOp>(funcName))
-    return SymbolRefAttr::get(context, funcName);
-
-  // Insert the function declaration
-  PatternRewriter::InsertionGuard insertGuard(rewriter);
-  rewriter.setInsertionPointToStart(module.getBody());
-  rewriter.create<LLVM::LLVMFuncOp>(module.getLoc(), funcName, funcType);
-  return SymbolRefAttr::get(context, funcName);
-}
-
-// Lowering pattern for onnx.Custom operations identified as "FusedGemm"
 struct ONNXFusedGemmOpLowering : public OpConversionPattern<ONNXCustomOp> {
-  // Assign a high benefit to prioritize this pattern over generic custom op lowering
   ONNXFusedGemmOpLowering(TypeConverter &typeConverter, MLIRContext *ctx)
       : OpConversionPattern(typeConverter, ctx, /*benefit=*/10) {}
 
   LogicalResult matchAndRewrite(ONNXCustomOp customOp,
-      ONNXCustomOpAdaptor adaptor,
+      ONNXCustomOpAdaptor operandAdaptor,
       ConversionPatternRewriter &rewriter) const final {
 
-    // Check if this custom op is the one we want to handle ("FusedGemm")
+    // Only handle FusedGemm
     StringAttr funcNameAttr = customOp.getFunctionNameAttr();
-    if (!funcNameAttr || funcNameAttr.getValue() != "FusedGemm") {
-      return failure(); // Not the FusedGemm custom op, let other patterns handle it
-    }
-
-    LLVM_DEBUG(llvm::dbgs() << "ONNXFusedGemmOpLowering matched and rewriting op "
-                           << customOp->getName() << "\n");
+    if (!funcNameAttr || funcNameAttr.getValue() != "FusedGemm")
+      return failure();
 
     Operation *op = customOp.getOperation();
     Location loc = op->getLoc();
+    ValueRange operands = operandAdaptor.getOperands();
 
-    // Get operands using the adaptor (already converted by the framework)
-    Value A = adaptor.getOperands()[0];
-    Value B = adaptor.getOperands()[1];
-    // Bias is the third operand, if present
-    Value BiasOperand = (adaptor.getOperands().size() > 2) ? adaptor.getOperands()[2] : nullptr;
+    // Helper builders.
+    MultiDialectBuilder<AffineBuilder, IndexExprBuilderForKrnl, KrnlBuilder,
+        MemRefBuilder>
+        create(rewriter, loc);
+    IndexExprScope scope(create.krnlIE);
 
-    // Get attributes directly from the customOp
+    // Get shape using the shape helper.
+    ONNXCustomOpShapeHelper shapeHelper(op, operands, &create.krnlIE);
+    shapeHelper.computeShapeAndAssertOnFailure();
+
+    // Prepare output allocation (FusedGemm has a single output).
+    // Prepare output allocation (FusedGemm has a single output).
+    Type outputType = op->getResultTypes()[0];
+    MemRefType outputMemRefType =
+        mlir::cast<MemRefType>(typeConverter->convertType(outputType));
+
+    // Compute M and N from input shapes (as in your code)
+    MemRefBuilder memrefBuilder(rewriter, loc);
     IntegerAttr transAAttr = customOp->getAttrOfType<IntegerAttr>("transA");
     IntegerAttr transBAttr = customOp->getAttrOfType<IntegerAttr>("transB");
-    // StringAttr activationAttr = customOp->getAttrOfType<StringAttr>("activation"); // Assuming ReLU for now
-
-    if (!transAAttr || !transBAttr) {
-        customOp->emitError("Missing 'transA' or 'transB' attribute for FusedGemm");
-        return failure();
-    }
-    int64_t transA = transAAttr.getInt();
-    int64_t transB = transBAttr.getInt();
-
-    // Operands A and B must have been converted to MemRefType by the framework
-    auto aMemRefType = A.getType().dyn_cast<MemRefType>();
-    auto bMemRefType = B.getType().dyn_cast<MemRefType>();
-    if (!aMemRefType || !bMemRefType) {
-       customOp->emitError("Operands A and B must be MemRefType after conversion");
-       return failure();
-    }
-
-    // Get M, N, K dimensions from the *memref* types using MemRefBuilder helper
-    MemRefBuilder createMemRef(rewriter, loc);
+    int64_t transA = transAAttr ? transAAttr.getValue().getSExtValue() : 0;
+    int64_t transB = transBAttr ? transBAttr.getValue().getSExtValue() : 0;
+    Value A = operands[0];
+    Value B = operands[1];
     Value M, N, K;
-    if (transA == 0) { // A is M x K
-      M = createMemRef.dim(A, 0);
-      K = createMemRef.dim(A, 1);
-    } else { // A is K x M
-      K = createMemRef.dim(A, 0);
-      M = createMemRef.dim(A, 1);
-    }
-
-    if (transB == 0) { // B is K x N
-      // TODO: Add verification that K matches dim 0 of B if both are static
-      N = createMemRef.dim(B, 1);
-    } else { // B is N x K
-      N = createMemRef.dim(B, 0);
-      // TODO: Add verification that K matches dim 1 of B if both are static
-    }
-
-    // Allocate the output buffer Y
-    Value Y;
-    // Get the original output type and convert it using the TypeConverter
-    auto outputType = customOp.getResult(0).getType().dyn_cast<RankedTensorType>();
-    if (!outputType) {
-        customOp->emitError("Output must be a ranked tensor type");
-        return failure();
-    }
-    auto outputMemRefType = typeConverter->convertType(outputType).dyn_cast<MemRefType>();
-     if (!outputMemRefType) {
-        customOp->emitError("Failed to convert output tensor type to memref type");
-        return failure();
-    }
-
-    // Allocate memory for the output tensor
-    if (hasAllConstantDimensions(outputMemRefType)) {
-      Y = createMemRef.alloc(outputMemRefType);
+    if (transA == 0) {
+      M = memrefBuilder.dim(A, 0);
+      K = memrefBuilder.dim(A, 1);
     } else {
-      // Pass dynamic dimensions M, N needed for allocation
-      Y = createMemRef.alloc(outputMemRefType, {M, N});
+      K = memrefBuilder.dim(A, 0);
+      M = memrefBuilder.dim(A, 1);
     }
-
-    // Prepare arguments for the external C++ function call
-    // Signature: void ort_cpu_ep_fused_gemm(float* A, float* B, float* Bias, float* Y,
-    //                                       int64_t M, int64_t N, int64_t K, int64_t transA, int64_t transB)
-    auto int64Type = rewriter.getI64Type();
-    // Assuming float type based on runtime function signature
-    auto floatPtrType = LLVM::LLVMPointerType::get(rewriter.getF32Type());
-
-    // Convert transA and transB attributes to LLVM constants
-    Value llvmTransA = rewriter.create<LLVM::ConstantOp>(loc, int64Type, rewriter.getI64IntegerAttr(transA));
-    Value llvmTransB = rewriter.create<LLVM::ConstantOp>(loc, int64Type, rewriter.getI64IntegerAttr(transB));
-
-    // Get LLVM pointers to the data buffers of the MemRefs
-    Value ptrA = createMemRef.data(A);
-    Value ptrB = createMemRef.data(B);
-    Value ptrY = createMemRef.data(Y);
-
-    // Handle optional Bias: get pointer if BiasOperand is a valid MemRef, otherwise pass null
-    Value ptrBias;
-    if (BiasOperand && !mlir::isa<NoneType>(BiasOperand.getType())) {
-         auto biasMemRefType = BiasOperand.getType().dyn_cast<MemRefType>();
-         if (!biasMemRefType) {
-             customOp->emitError("Bias operand must be MemRefType or None after conversion");
-             return failure();
-         }
-         ptrBias = createMemRef.data(BiasOperand);
+    if (transB == 0) {
+      N = memrefBuilder.dim(B, 1);
     } else {
-         ptrBias = rewriter.create<LLVM::NullOp>(loc, floatPtrType);
+      N = memrefBuilder.dim(B, 0);
     }
 
+    // Allocate output buffer Y with dynamic dims [M, N] if needed.
+    Value outputAlloc;
+    if (outputMemRefType.getNumDynamicDims() == 2) {
+      outputAlloc = create.mem.alignedAlloc(outputMemRefType, {M, N});
+    } else if (outputMemRefType.getNumDynamicDims() == 1) {
+      if (outputMemRefType.isDynamicDim(0))
+        outputAlloc = create.mem.alignedAlloc(outputMemRefType, {M});
+      else
+        outputAlloc = create.mem.alignedAlloc(outputMemRefType, {N});
+    } else {
+      outputAlloc = create.mem.alignedAlloc(outputMemRefType);
+    }
 
-    // Define the LLVM function type for the external C++ function
-    auto llvmF32Type = rewriter.getF32Type(); // Assuming float
-    auto llvmI64Type = rewriter.getI64Type();
-    auto llvmVoidType = LLVM::LLVMVoidType::get(rewriter.getContext());
-    auto funcType = LLVM::LLVMFunctionType::get(llvmVoidType,
-        {floatPtrType, floatPtrType, floatPtrType, floatPtrType, // A*, B*, Bias*, Y*
-         llvmI64Type, llvmI64Type, llvmI64Type,                // M, N, K
-         llvmI64Type, llvmI64Type},                            // transA, transB
-        false); // isVarArg
+    // Prepare operands for KrnlCallOp.
+    Value BiasOperand = (operands.size() > 2) ? operands[2] : Value();
+    Value Y = outputAlloc;
 
-    // Get or insert the external function declaration into the module
-    ModuleOp parentModule = op->getParentOfType<ModuleOp>();
-    auto externFuncRef = getOrInsertExternFunc(
-        "ort_cpu_ep_fused_gemm", parentModule, funcType, rewriter);
+    // Prepare integer attributes as values
+    Value transAVal = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI64Type(), rewriter.getI64IntegerAttr(transA));
+    Value transBVal = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI64Type(), rewriter.getI64IntegerAttr(transB));
 
-    // Create the LLVM function call op
-    rewriter.create<LLVM::CallOp>(loc, llvmVoidType, externFuncRef,
-        ValueRange{ptrA, ptrB, ptrBias, ptrY, M, N, K, llvmTransA, llvmTransB});
+    
+    // Compose the parameter list for KrnlCallOp
+    SmallVector<Value, 9> callOperands{A, B, BiasOperand, Y, M, N, K, transAVal, transBVal};
 
-    // Replace the original onnx.Custom op with the allocated output buffer Y
+    // List of attributes to copy (if any, or empty if not needed)
+    std::vector<std::string> attributeNames; // Add attribute names if you want to copy any
+
+    // Lower to KrnlCallOp using the correct builder signature
+    rewriter.create<KrnlCallOp>(
+        loc,
+        "ort_cpu_ep_fused_gemm", // function name as string
+        SmallVector<Value, 1>{Y}, // outputs
+        op,                       // original op (for attribute copying)
+        callOperands,             // inputs
+        attributeNames            // attributes to copy
+    );
+
     rewriter.replaceOp(op, Y);
     return success();
-  }
+      }
 };
 
-// Function to register the lowering pattern
 void populateONNXToKrnlConversionAdditionalPass(RewritePatternSet &patterns,
     TypeConverter &typeConverter, MLIRContext *ctx) {
   patterns.insert<ONNXFusedGemmOpLowering>(typeConverter, ctx);
 }
 
 } // namespace onnx_mlir
+
+void onnx_mlir::populateLoweringONNXFusedGemmOpPattern(
+    mlir::RewritePatternSet &patterns,
+    mlir::TypeConverter &typeConverter,
+    mlir::MLIRContext *ctx) {
+  populateONNXToKrnlConversionAdditionalPass(patterns, typeConverter, ctx);
+}
