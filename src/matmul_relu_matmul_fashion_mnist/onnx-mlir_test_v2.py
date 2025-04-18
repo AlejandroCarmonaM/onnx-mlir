@@ -103,22 +103,11 @@ def find_script(name, default_path):
     print(f"❌ Error: Script '{name}' not found at '{default_path}' (abs: {absolute_path}). Please provide the correct path.")
     sys.exit(1) # Exit if script not found
 
+# ...existing code...
+
 def compile_onnx_model(onnx_model_path, output_dir, onnx_mlir_exec_path):
     """
-    Compiles an ONNX model using onnx-mlir, saving the output library
-    as 'model.so' inside the specified output directory.
-
-    Args:
-        onnx_model_path (str): Path to the input ONNX model file.
-        output_dir (str): Path to the directory where 'model.so' and
-                          'model.constants.bin' should be saved.
-        onnx_mlir_exec_path (str): Path to the onnx-mlir executable.
-
-    Returns:
-        tuple(bool, str or None): A tuple containing:
-            - bool: True if compilation was successful, False otherwise.
-            - str or None: The absolute path to the output directory if successful,
-                           otherwise None.
+    Compiles an ONNX model using onnx-mlir, then links with FusedGemmRuntime.o.
     """
     print(f"Compiling ONNX model '{onnx_model_path}' with onnx-mlir...")
     absolute_onnx_model_path = os.path.abspath(onnx_model_path)
@@ -138,42 +127,56 @@ def compile_onnx_model(onnx_model_path, output_dir, onnx_mlir_exec_path):
     # Define the base name for output files *inside* the output directory
     output_base_name = os.path.join(absolute_output_dir, "model")
     expected_lib_path = output_base_name + ".so"
+    expected_obj_path = output_base_name + ".o"
 
+    # Step 1: Emit object file
     compile_command = [
         onnx_mlir_exec_path,
-        "--EmitLib",
-        absolute_onnx_model_path, # Use absolute path for input model
-        "-o", output_base_name    # Use absolute path/basename for output
+        "--EmitObj",
+        absolute_onnx_model_path,
+        "-o", output_base_name
     ]
     print(f"Running command: {' '.join(compile_command)}")
-
     try:
-        # Run the compilation
-        result = subprocess.run(compile_command, check=True, capture_output=True, text=True, timeout=300) # Use default CWD
-        print("✅ ONNX-MLIR compilation successful.")
-        # print("Compiler Output:\n", result.stdout) # Optional: print compiler output
-        # print("Compiler Stderr:\n", result.stderr) # Optional: print compiler stderr
+        result = subprocess.run(compile_command, check=True, capture_output=True, text=True, timeout=300)
+        print("✅ ONNX-MLIR object emission successful.")
+        if not os.path.exists(expected_obj_path):
+            print(f"❌ Error: Compiled object '{expected_obj_path}' not found after compilation.")
+            print("Compiler Stdout:\n", result.stdout)
+            print("Compiler Stderr:\n", result.stderr)
+            return False, None
+    except Exception as e:
+        print(f"❌ Error: ONNX-MLIR object emission failed: {e}")
+        return False, None
 
-        # Verify the expected output library exists
+    # Step 2: Link with FusedGemmRuntime.o
+    fused_obj = os.path.abspath("FusedGemmRuntime.o")
+    if not os.path.exists(fused_obj):
+        print(f"❌ Error: FusedGemmRuntime.o not found at {fused_obj}")
+        return False, None
+    clang_cmd = [
+        "clang++",
+        expected_obj_path,
+        fused_obj,
+        "-o", expected_lib_path,
+        "-shared", "-fPIC",
+        "-L/workdir/onnx-mlir/build/Debug/lib", "-lcruntime"
+    ]
+    print(f"Linking with FusedGemmRuntime.o: {' '.join(clang_cmd)}")
+    try:
+        result = subprocess.run(clang_cmd, check=True, capture_output=True, text=True, timeout=120)
+        print("✅ Linking successful.")
         if not os.path.exists(expected_lib_path):
-             print(f"❌ Error: Compiled library '{expected_lib_path}' not found after compilation.")
-             print("Compiler Stdout:\n", result.stdout)
-             print("Compiler Stderr:\n", result.stderr)
-             return False, None
-
-        # Return the absolute path to the output DIRECTORY
+            print(f"❌ Error: Linked library '{expected_lib_path}' not found after linking.")
+            print("Linker Stdout:\n", result.stdout)
+            print("Linker Stderr:\n", result.stderr)
+            return False, None
         return True, absolute_output_dir
-    except FileNotFoundError:
-        print(f"❌ Error: '{onnx_mlir_exec_path}' command not found.")
+    except Exception as e:
+        print(f"❌ Error: Linking failed: {e}")
         return False, None
-    except subprocess.TimeoutExpired:
-        print(f"❌ Error: ONNX-MLIR compilation timed out.")
-        return False, None
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Error: ONNX-MLIR compilation failed with exit code {e.returncode}.")
-        print("Compiler Stderr:\n", e.stderr)
-        print("Compiler Stdout:\n", e.stdout)
-        return False, None
+
+# ...existing code...
 
 def run_inference_with_script(run_script_path, compiled_model_dir_path, input_data_list, output_dir):
     """

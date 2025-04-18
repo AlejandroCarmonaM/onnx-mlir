@@ -51,7 +51,7 @@ add_onnx_mlir_library(OMTensorUtils
   OMTensorList.cpp
   OMUnique.cpp
   OnnxDataType.cpp
-  # MODICATION TO INCLUDE THE FUSED GEMM CPP PLACEHOLDER
+  # Include the FusedGemm C++ placeholder implementation
   FusedGemmRuntime.cpp
   ${ONNX_MLIR_SRC_ROOT}/src/Support/SmallFPConversion.c
 
@@ -67,6 +67,10 @@ set_target_properties(OMTensorUtils
   PROPERTIES
   POSITION_INDEPENDENT_CODE TRUE
   )
+
+# No need to add or link FusedGemmRuntime as a separate library.
+# Including FusedGemmRuntime.cpp in OMTensorUtils ensures all onnx-mlir generated model libraries
+# will have access to the fused gemm symbol automatically.
 
 if (ONNX_MLIR_ENABLE_PYRUNTIME_LIGHT)
 add_compile_definitions(ENABLE_PYRUNTIME_LIGHT)
