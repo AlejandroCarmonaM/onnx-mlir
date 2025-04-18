@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+// cmake --build . --target OMONNXOps
+
 #include "src/Dialect/ONNX/ONNXOps/OpHelper.hpp"
 #include "mlir/IR/TypeUtilities.h" // For getElementTypeOrSelf
 #include "src/Dialect/ONNX/ONNXOps/ShapeHelper.hpp" // For shape helper base class

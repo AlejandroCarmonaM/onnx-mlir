@@ -91,8 +91,10 @@ namespace onnx_mlir {
       ArrayRef<int64_t> outputShape = outputMemRefType.getShape(); // Shape from inferred type
       Value A = op->getOperand(0); // Original input A
       Value B = op->getOperand(1); // Original input B
-      bool transA = customOp->getAttrOfType<IntegerAttr>("transA").getInt() != 0;
-      bool transB = customOp->getAttrOfType<IntegerAttr>("transB").getInt() != 0;
+      // Use getValue().getSExtValue() instead of getInt()
+      bool transA = customOp->getAttrOfType<IntegerAttr>("transA").getValue().getSExtValue() != 0;
+      bool transB = customOp->getAttrOfType<IntegerAttr>("transB").getValue().getSExtValue() != 0;
+
 
       // Determine IndexExpr for dimension M (outputShape[0])
       if (outputShape[0] == ShapedType::kDynamic) {
