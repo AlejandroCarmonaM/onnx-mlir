@@ -107,15 +107,23 @@ def find_script(name, default_path):
 
 def compile_onnx_model(onnx_model_path, output_dir, onnx_mlir_exec_path):
     """
-    Compiles an ONNX model using onnx-mlir, then links with FusedGemmRuntime.o.
+    Compiles FusedGemmRuntime.cpp, then compiles an ONNX model using onnx-mlir,
+    and finally links them together into a shared library.
+    Assumes FusedGemmRuntime.cpp is in the current working directory.
     """
-    print(f"Compiling ONNX model '{onnx_model_path}' with onnx-mlir...")
+    print(f"Starting compilation process for '{onnx_model_path}'...")
     absolute_onnx_model_path = os.path.abspath(onnx_model_path)
     absolute_output_dir = os.path.abspath(output_dir)
+    fused_gemm_cpp_path = os.path.abspath("FusedGemmRuntime.cpp") # Assumed in CWD
 
+    # --- Basic Checks ---
     if not os.path.exists(absolute_onnx_model_path):
         print(f"❌ Error: Input ONNX model not found at '{absolute_onnx_model_path}'")
         return False, None
+    if not os.path.exists(fused_gemm_cpp_path):
+        print(f"❌ Error: FusedGemmRuntime.cpp not found at '{fused_gemm_cpp_path}' (expected in current directory)")
+        return False, None
+    # --- End Basic Checks ---
 
     # Ensure output directory exists and is clean
     if os.path.exists(absolute_output_dir):
@@ -124,56 +132,109 @@ def compile_onnx_model(onnx_model_path, output_dir, onnx_mlir_exec_path):
     os.makedirs(absolute_output_dir, exist_ok=True)
     print(f"Created compilation output directory: {absolute_output_dir}")
 
-    # Define the base name for output files *inside* the output directory
-    output_base_name = os.path.join(absolute_output_dir, "model")
-    expected_lib_path = output_base_name + ".so"
-    expected_obj_path = output_base_name + ".o"
+    # Define paths for intermediate and final files *inside* the output directory
+    fused_gemm_obj_path = os.path.join(absolute_output_dir, "FusedGemmRuntime.o")
+    model_base_name = os.path.join(absolute_output_dir, "model") # Base for onnx-mlir output
+    model_obj_path = model_base_name + ".o"
+    model_lib_path = model_base_name + ".so"
 
-    # Step 1: Emit object file
-    compile_command = [
-        onnx_mlir_exec_path,
-        "--EmitObj",
-        absolute_onnx_model_path,
-        "-o", output_base_name
+    # Step 1: Compile FusedGemmRuntime.cpp to FusedGemmRuntime.o
+    print(f"Compiling custom runtime '{fused_gemm_cpp_path}'...")
+    # Add -I include paths if necessary for FusedGemmRuntime.cpp
+    compile_custom_cmd = [
+        "clang++",
+        "-c", fused_gemm_cpp_path,
+        "-o", fused_gemm_obj_path,
+        "-fPIC",
+        # "-I/path/to/onnx-mlir/include" # Example: Add if needed
     ]
-    print(f"Running command: {' '.join(compile_command)}")
+    print(f"Running command: {' '.join(compile_custom_cmd)}")
     try:
-        result = subprocess.run(compile_command, check=True, capture_output=True, text=True, timeout=300)
-        print("✅ ONNX-MLIR object emission successful.")
-        if not os.path.exists(expected_obj_path):
-            print(f"❌ Error: Compiled object '{expected_obj_path}' not found after compilation.")
+        result = subprocess.run(compile_custom_cmd, check=True, capture_output=True, text=True, timeout=120)
+        print("✅ Custom runtime compilation successful.")
+        if not os.path.exists(fused_gemm_obj_path):
+            print(f"❌ Error: Custom object '{fused_gemm_obj_path}' not found after compilation.")
             print("Compiler Stdout:\n", result.stdout)
             print("Compiler Stderr:\n", result.stderr)
             return False, None
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Error: Custom runtime compilation failed.")
+        print("Command:", ' '.join(e.cmd))
+        print("Return Code:", e.returncode)
+        print("Stdout:\n", e.stdout)
+        print("Stderr:\n", e.stderr)
+        return False, None
     except Exception as e:
-        print(f"❌ Error: ONNX-MLIR object emission failed: {e}")
+        print(f"❌ Error: Custom runtime compilation failed with unexpected error: {e}")
         return False, None
 
-    # Step 2: Link with FusedGemmRuntime.o
-    fused_obj = os.path.abspath("FusedGemmRuntime.o")
-    if not os.path.exists(fused_obj):
-        print(f"❌ Error: FusedGemmRuntime.o not found at {fused_obj}")
-        return False, None
-    clang_cmd = [
-        "clang++",
-        expected_obj_path,
-        fused_obj,
-        "-o", expected_lib_path,
-        "-shared", "-fPIC",
-        "-L/workdir/onnx-mlir/build/Debug/lib", "-lcruntime"
+
+    # Step 2: Compile ONNX model to model.o using onnx-mlir
+    print(f"Compiling ONNX model '{absolute_onnx_model_path}' to object file...")
+    compile_onnx_cmd = [
+        onnx_mlir_exec_path,
+        "--EmitObj",
+        absolute_onnx_model_path,
+        "-o", model_base_name # onnx-mlir appends .o automatically
     ]
-    print(f"Linking with FusedGemmRuntime.o: {' '.join(clang_cmd)}")
+    print(f"Running command: {' '.join(compile_onnx_cmd)}")
     try:
-        result = subprocess.run(clang_cmd, check=True, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(compile_onnx_cmd, check=True, capture_output=True, text=True, timeout=300)
+        print("✅ ONNX-MLIR object emission successful.")
+        if not os.path.exists(model_obj_path):
+            print(f"❌ Error: Compiled model object '{model_obj_path}' not found after compilation.")
+            print("Compiler Stdout:\n", result.stdout)
+            print("Compiler Stderr:\n", result.stderr)
+            return False, None
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Error: ONNX-MLIR object emission failed.")
+        print("Command:", ' '.join(e.cmd))
+        print("Return Code:", e.returncode)
+        print("Stdout:\n", e.stdout)
+        print("Stderr:\n", e.stderr)
+        return False, None
+    except Exception as e:
+        print(f"❌ Error: ONNX-MLIR object emission failed with unexpected error: {e}")
+        return False, None
+
+    # Step 3: Link model.o and FusedGemmRuntime.o into model.so
+    print(f"Linking '{model_obj_path}' and '{fused_gemm_obj_path}' into '{model_lib_path}'...")
+    # Determine ONNX_MLIR_HOME to find the runtime library path
+    # You might need a more robust way to find this, e.g., environment variable or config
+    onnx_mlir_home = os.environ.get("ONNX_MLIR_HOME", "/workdir/onnx-mlir/build/Debug") # Default guess
+    lib_dir = os.path.join(onnx_mlir_home, "lib")
+    if not os.path.isdir(lib_dir):
+         print(f"⚠️ Warning: ONNX-MLIR library directory '{lib_dir}' not found. Linking might fail.")
+         # Attempt default system link paths? For now, proceed with the potentially incorrect path.
+
+    link_cmd = [
+        "clang++",
+        model_obj_path,
+        fused_gemm_obj_path,
+        "-o", model_lib_path,
+        "-shared", "-fPIC",
+        f"-L{lib_dir}", "-lcruntime" # Link against onnx-mlir C runtime
+    ]
+    print(f"Running command: {' '.join(link_cmd)}")
+    try:
+        result = subprocess.run(link_cmd, check=True, capture_output=True, text=True, timeout=120)
         print("✅ Linking successful.")
-        if not os.path.exists(expected_lib_path):
-            print(f"❌ Error: Linked library '{expected_lib_path}' not found after linking.")
+        if not os.path.exists(model_lib_path):
+            print(f"❌ Error: Linked library '{model_lib_path}' not found after linking.")
             print("Linker Stdout:\n", result.stdout)
             print("Linker Stderr:\n", result.stderr)
             return False, None
+        # Return the directory containing the final .so file
         return True, absolute_output_dir
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Error: Linking failed.")
+        print("Command:", ' '.join(e.cmd))
+        print("Return Code:", e.returncode)
+        print("Stdout:\n", e.stdout)
+        print("Stderr:\n", e.stderr)
+        return False, None
     except Exception as e:
-        print(f"❌ Error: Linking failed: {e}")
+        print(f"❌ Error: Linking failed with unexpected error: {e}")
         return False, None
 
 # ...existing code...
@@ -278,14 +339,34 @@ while True:
     print(f"  Working directory for subprocess: {absolute_output_dir}")
     # Run the script with cwd set to the specified output directory
     env = os.environ.copy()
+    onnx_mlir_home = os.environ.get("ONNX_MLIR_HOME", "/workdir/onnx-mlir/build/Debug") # Make sure this is correct
+    lib_dir = os.path.join(onnx_mlir_home, "lib")
+    if os.path.isdir(lib_dir):
+         env['LD_LIBRARY_PATH'] = f"{lib_dir}:{env.get('LD_LIBRARY_PATH', '')}"
+         print(f"  Setting LD_LIBRARY_PATH for subprocess: {env['LD_LIBRARY_PATH']}")
+    else:
+         print(f"⚠️ Warning: ONNX-MLIR lib dir '{lib_dir}' not found. LD_LIBRARY_PATH not set.")
+
     if "ONNX_MLIR_HOME" not in env:
-            print("⚠️ Warning: ONNX_MLIR_HOME environment variable not found. RunONNXModel.py might fail.")
-            # Consider adding ONNX_MLIR_HOME if known and missing? For now, just warn.
+         print("⚠️ Warning: ONNX_MLIR_HOME environment variable not found. RunONNXModel.py might fail.")
+
     start_time = time.time()
-    result = subprocess.run(run_command, check=True, capture_output=True, text=True, cwd=absolute_output_dir, timeout=60, env=env)
-    end_time = time.time()
-    # print("RunONNXModel Output:\n", result.stdout) # Often empty on success
-    # print("RunONNXModel Stderr:\n", result.stderr) # Check stderr for potential info
+    try: # Add try/except around subprocess.run
+        result = subprocess.run(run_command, check=True, capture_output=True, text=True, cwd=absolute_output_dir, timeout=60, env=env)
+        end_time = time.time()
+        # print("RunONNXModel Output:\n", result.stdout)
+        # print("RunONNXModel Stderr:\n", result.stderr)
+    except subprocess.CalledProcessError as e:
+         print(f"❌ Subprocess failed!")
+         print("Command:", ' '.join(e.cmd))
+         print("Return Code:", e.returncode)
+         print("Signal:", e.signal if hasattr(e, 'signal') else 'N/A') # Check if signal attribute exists
+         print("Stdout:\n", e.stdout)
+         print("Stderr:\n", e.stderr)
+         return None, 0 # Indicate failure
+    except Exception as e:
+         print(f"❌ Subprocess failed with unexpected error: {e}")
+         return None, 0 # Indicate failure
 
     # --- Load output files from the specified output directory ---
     loaded_outputs = []
