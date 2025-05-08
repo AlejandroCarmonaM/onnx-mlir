@@ -128,8 +128,9 @@ extern "C" void ort_cpu_ep_fused_gemm(
     }
   }
   // Check if Bias tensor is valid (if provided)
-  if (Bias_omTensor) {
-    const int64_t* Bias_strides = omTensorGetStrides(Bias_omTensor);
+  //const int64_t* Bias_strides;
+   fprintf(stdout, "################################Bias tensor provided.\n");
+   const int64_t* Bias_strides = omTensorGetStrides(Bias_omTensor);
     if (!Bias_strides) {
       fprintf(stdout, "Error: Bias tensor has null strides.\n");
       return;
@@ -141,7 +142,6 @@ extern "C" void ort_cpu_ep_fused_gemm(
         return;
       }
     }
-  }
 
   // LOGGING
   fprintf(stdout, "FusedGemm called with:\n");
@@ -163,6 +163,14 @@ extern "C" void ort_cpu_ep_fused_gemm(
           omTensorGetShape(Y_omTensor)[0],
           omTensorGetShape(Y_omTensor)[1],
           Y_strides[0], Y_strides[1]);
+   if (Bias_omTensor) {
+      fprintf(stdout, "  Bias_omTensor: rank=%d, dtype=%d, shape=[%lld,%lld], strides=[%lld,%lld]\n",
+              omTensorGetRank(Bias_omTensor),
+              omTensorGetDataType(Bias_omTensor),
+              omTensorGetShape(Bias_omTensor)[0],
+              omTensorGetShape(Bias_omTensor)[1],
+              Bias_strides[0], Bias_strides[1]);
+    }
   fprintf(stdout, "  M=%lld, N=%lld, K=%lld, transA=%lld, transB=%lld\n",
           M, N, K, transA, transB);
   fflush(stdout); // Ensure all logs are flushed immediately
