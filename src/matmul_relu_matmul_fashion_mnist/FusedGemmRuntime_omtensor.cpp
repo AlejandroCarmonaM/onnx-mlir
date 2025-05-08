@@ -1,19 +1,24 @@
 /**********************************************
  * IMPORT LIBRARIES
  **********************************************/
-#include <cstdint>  // For int64_t
-#include <vector>   // Not strictly used here, but common
+#include <cstdint>
+#include <vector>
 #include <cmath>    // For std::max
-#include <iostream> // For std::cout, std::endl (placeholder logging)
-#include <cstdio>   // For fprintf, stderr, fflush (debug logging)
+#include <cstdio>   // For fprintf, stderr, fflush
+#include <cstring>  // For memcpy
+#include <numeric>  // For omTensorGetNumElems helper (std::accumulate)
 
 // ONNX-MLIR Runtime API
 #include "OnnxMlirRuntime.h"
+// ONNX Runtime C API
+#include "onnxruntime_c_api.h"
 
 /**********************************************
  * CONSTANTS & PARAMETERS
  **********************************************/
-// None defined for this specific file.
+// Using fixed alpha and beta as per "Mimics ONNX Gemm (alpha=1, beta=1)"
+const float GEMM_ALPHA = 1.0f;
+const float GEMM_BETA = 1.0f; // Beta applies to the C/Bias input
 
 /**********************************************
  * HELPER FUNCTION DEFINITIONS
@@ -21,44 +26,42 @@
 
 /*
  * Purpose: Basic ReLU activation function.
- * Parameters:
- *    - x (float): Input value.
- * Returns:
- *    - float: max(0.0f, x).
  */
 inline float relu(float x) {
     return std::max(0.0f, x);
 }
 
 /*
- * Purpose: Compute the linear offset into a flat buffer for a 2D tensor
- *          given its strides and logical indices.
- * Parameters:
- *    - strides (const int64_t*): Pointer to the strides array for the tensor.
- *                                 Assumes strides[0] is stride for dim 0, strides[1] for dim 1.
- *    - i (int64_t): Logical index for the first dimension.
- *    - j (int64_t): Logical index for the second dimension.
- * Returns:
- *    - int64_t: The calculated offset.
+ * Purpose: Calculate the total number of elements in an OMTensor.
  */
-inline int64_t offset2d(const int64_t* strides, int64_t i, int64_t j) {
-    // Handle potential null strides defensively, although unlikely for valid tensors
-    if (!strides) return 0; // Or handle error appropriately
-    return i * strides[0] + j * strides[1];
+static size_t omTensorGetNumElems(OMTensor* omTensor) {
+    if (!omTensor) return 0;
+    int32_t rank = omTensorGetRank(omTensor);
+    if (rank == 0 && omTensorGetDataPtr(omTensor) != nullptr) return 1;
+    if (rank <= 0) return 0; // Also handles negative/invalid rank
+
+    const int64_t* dims = omTensorGetShape(omTensor);
+    if (!dims) return 0;
+
+    size_t num_elems = 1;
+    for (int32_t i = 0; i < rank; ++i) {
+        if (dims[i] < 0) return 0; // Invalid dimension
+        num_elems *= static_cast<size_t>(dims[i]);
+    }
+    return num_elems;
 }
 
 /*
- * Purpose: Compute the linear offset into a flat buffer for a 1D tensor
- *          given its stride and logical index.
- * Parameters:
- *    - strides (const int64_t*): Pointer to the strides array (only strides[0] is used).
- *    - i (int64_t): Logical index for the dimension.
- * Returns:
- *    - int64_t: The calculated offset.
+ * Purpose: Helper to check ORT status and print errors.
  */
-inline int64_t offset1d(const int64_t* strides, int64_t i) {
-    if (!strides) return 0;
-    return i * strides[0];
+static void CheckOrtStatus(const OrtApi* ort_api, OrtStatus* status, const char* operation_name) {
+    if (status != NULL) {
+        const char* msg = ort_api->GetErrorMessage(status);
+        fprintf(stderr, "    ONNX Runtime ERROR during %s: %s\n", operation_name, msg);
+        ort_api->ReleaseStatus(status);
+        // In experimental code, we might not exit, to see if cleanup can proceed
+        // or to allow the caller to handle the error if this function returned a status.
+    }
 }
 
 
@@ -67,186 +70,285 @@ inline int64_t offset1d(const int64_t* strides, int64_t i) {
  **********************************************/
 
 /*
- * Purpose: Implements the FusedGemm operation (Gemm + Bias + ReLU) using OMTensor inputs.
- *          Mimics ONNX Gemm (alpha=1, beta=1) followed by ONNX ReLU.
- *          Handles tensor strides and bias broadcasting.
+ * Purpose: Wraps ONNX Runtime's FusedGemm operator and applies ReLU.
+ *          Attempts a model-less, context-less invocation.
  * Parameters:
- *    - A_omTensor (OMTensor*): Input tensor A (MxK or KxM).
- *    - B_omTensor (OMTensor*): Input tensor B (KxN or NxK).
- *    - Bias_omTensor (OMTensor*): Optional input tensor C/Bias, broadcastable to (MxN).
- *    - Y_omTensor (OMTensor*): Output tensor Y (MxN).
+ *    - A_omTensor (OMTensor*): Input tensor A.
+ *    - B_omTensor (OMTensor*): Input tensor B.
+ *    - Bias_omTensor (OMTensor*): Optional input tensor C/Bias.
+ *    - Y_omTensor (OMTensor*): Output tensor Y (result of FusedGemm + ReLU).
  *    - M (int64_t): Dimension M of the output.
  *    - N (int64_t): Dimension N of the output.
  *    - K (int64_t): Dimension K (shared dimension).
- *    - transA (int64_t): Flag indicating if A should be transposed (0=No, Non-zero=Yes).
- *    - transB (int64_t): Flag indicating if B should be transposed (0=No, Non-zero=Yes).
+ *    - transA_param (int64_t): Flag indicating if A should be transposed.
+ *    - transB_param (int64_t): Flag indicating if B should be transposed.
  * Returns:
- *    - void: Output Y is modified in place.
+ *    - void: Output Y_omTensor is modified in place.
  */
 extern "C" void ort_cpu_ep_fused_gemm(
     OMTensor* A_omTensor,
     OMTensor* B_omTensor,
-    OMTensor* Bias_omTensor, // Corresponds to Gemm's 'C' input
+    OMTensor* Bias_omTensor,
     OMTensor* Y_omTensor,
     int64_t M,
     int64_t N,
     int64_t K,
-    int64_t transA,
-    int64_t transB
+    int64_t transA_param, // Renamed to avoid conflict with OrtOpAttr variable
+    int64_t transB_param  // Renamed to avoid conflict with OrtOpAttr variable
 ) {
-
     /******************************************
-     * INITIAL LOGGING & VALIDATION
+     * INITIAL LOGGING & BASIC VALIDATION
      ******************************************/
-    // Use fprintf for immediate output, helpful before potential crashes
-    fprintf(stderr, ">>> C++ ort_cpu_ep_fused_gemm (OMTensor version) called:\n");
+    fprintf(stdout, "##########################################\n C++ ort_cpu_ep_fused_gemm (ORT Direct Call Wrapper) called:\n#######################\n");
+    
+    // As a verification step to verify that the call is happening, we exit now incondionally
+    exit(0);
+    
+    fprintf(stderr, ">>> C++ ort_cpu_ep_fused_gemm (ORT Direct Call Wrapper) called:\n");
     fprintf(stderr, "    M=%lld, N=%lld, K=%lld, transA=%lld, transB=%lld\n",
-            (long long)M, (long long)N, (long long)K, (long long)transA, (long long)transB);
+            (long long)M, (long long)N, (long long)K, (long long)transA_param, (long long)transB_param);
     fprintf(stderr, "    A OMTensor*: %p, B OMTensor*: %p, Bias OMTensor*: %p, Y OMTensor*: %p\n",
             (void*)A_omTensor, (void*)B_omTensor, (void*)Bias_omTensor, (void*)Y_omTensor);
     fflush(stderr);
 
-    // Check for NULL OMTensor pointers for required inputs/outputs
-    if (!A_omTensor || !B_omTensor || !Y_omTensor) {
-         fprintf(stderr, "    ERROR: Received NULL OMTensor pointer for A, B, or Y!\n");
+    if (!A_omTensor || !B_omTensor || !Y_omTensor ||
+        !omTensorGetDataPtr(A_omTensor) || !omTensorGetDataPtr(B_omTensor) || !omTensorGetDataPtr(Y_omTensor)) {
+         fprintf(stderr, "    ERROR: Received NULL OMTensor or NULL data pointer for A, B, or Y!\n");
          fflush(stderr);
-         return; // Cannot proceed
+         return;
+    }
+    if (omTensorGetDataType(A_omTensor) != ONNX_TYPE_FLOAT ||
+        omTensorGetDataType(B_omTensor) != ONNX_TYPE_FLOAT ||
+        (Bias_omTensor && omTensorGetDataPtr(Bias_omTensor) && omTensorGetDataType(Bias_omTensor) != ONNX_TYPE_FLOAT) ||
+        omTensorGetDataType(Y_omTensor) != ONNX_TYPE_FLOAT) {
+        fprintf(stderr, "    ERROR: All provided tensors must be of type float!\n");
+        fflush(stderr);
+        return;
     }
 
     /******************************************
-     * EXTRACT DATA POINTERS & METADATA
+     * INITIALIZE ONNX RUNTIME API & ENV
      ******************************************/
-    // Extract raw data pointers (assuming float32 based on typical usage)
-    // TODO: Add type checking if supporting other data types is needed.
-    const float* A_data = static_cast<const float*>(omTensorGetDataPtr(A_omTensor));
-    const float* B_data = static_cast<const float*>(omTensorGetDataPtr(B_omTensor));
-    float* Y_data       = static_cast<float*>(omTensorGetDataPtr(Y_omTensor));
-
-    // Get strides for A, B, Y (crucial for correct indexing)
-    const int64_t* strideA = omTensorGetStrides(A_omTensor);
-    const int64_t* strideB = omTensorGetStrides(B_omTensor);
-    const int64_t* strideY = omTensorGetStrides(Y_omTensor);
-
-    // Check for NULL pointers *after* extraction
-    if (!A_data || !B_data || !Y_data || !strideA || !strideB || !strideY) {
-         fprintf(stderr, "    ERROR: Extracted data pointer or strides for A, B, or Y is NULL!\n");
-         fprintf(stderr, "    A_data=%p, B_data=%p, Y_data=%p, strideA=%p, strideB=%p, strideY=%p\n",
-                 (void*)A_data, (void*)B_data, (void*)Y_data, (void*)strideA, (void*)strideB, (void*)strideY);
-         fflush(stderr);
-         return; // Cannot proceed
+    const OrtApi* ort_api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
+    if (!ort_api) {
+        fprintf(stderr, "    ERROR: Failed to get ONNX Runtime API base!\n");
+        fflush(stderr);
+        return;
     }
 
-    // Extract Bias data (if present)
-    const float* Bias_data = nullptr;
-    const int64_t* strideBias = nullptr;
-    const int64_t* dimsBias = nullptr;
-    int biasRank = 0;
-    if (Bias_omTensor) {
-        Bias_data = static_cast<const float*>(omTensorGetDataPtr(Bias_omTensor));
-        strideBias = omTensorGetStrides(Bias_omTensor);
-        /*(doesn't work)*/ //dimsBias = omTensorGetDimensions(Bias_omTensor); // Needed for broadcasting rules
-        dimsBias = omTensorGetShape(Bias_omTensor); // Assuming this function gives the shape/dims
-        biasRank = omTensorGetRank(Bias_omTensor);
+    // ...existing code...
+    OrtEnv* ort_env = nullptr;
+    OrtStatus* current_status = ort_api->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "ort_direct_fusedgemm_env", &ort_env);
+    CheckOrtStatus(ort_api, current_status, "CreateEnv");
+    if (!ort_env || current_status !=NULL) { 
+        fprintf(stderr, "    ERROR: Failed to create ONNX Runtime Environment!\n");
+        fflush(stderr);
+        if (current_status) ort_api->ReleaseStatus(current_status); 
+        return;
+    }
 
-        if (!Bias_data || !strideBias || !dimsBias) {
-             fprintf(stderr, "    WARNING: Bias OMTensor exists but extracted data pointer, strides, or dims is NULL! Treating as no bias.\n");
-             fprintf(stderr, "    Bias_data=%p, strideBias=%p, dimsBias=%p\n", (void*)Bias_data, (void*)strideBias, (void*)dimsBias);
-             fflush(stderr);
-             Bias_data = nullptr; // Treat as if no bias was provided
-        } else {
-             fprintf(stderr, "    Bias Info: Rank=%d, Data=%p, Strides=%p, Dims=%p\n", biasRank, (void*)Bias_data, (void*)strideBias, (void*)dimsBias);
-             // Optional: Print actual dims/strides
-             // for(int i=0; i<biasRank; ++i) fprintf(stderr, " Bias dim[%d]=%lld, stride[%d]=%lld\n", i, (long long)dimsBias[i], i, (long long)strideBias[i]);
-        }
+    OrtAllocator* allocator = nullptr;
+    current_status = ort_api->GetAllocatorWithDefaultOptions(&allocator); // Removed ort_env
+    CheckOrtStatus(ort_api, current_status, "GetAllocatorWithDefaultOptions");
+    if (!allocator || current_status != NULL) {
+        fprintf(stderr, "    ERROR: Failed to get default allocator.\n");
+// ...existing code...
+        if (current_status) ort_api->ReleaseStatus(current_status);
+        ort_api->ReleaseEnv(ort_env);
+        return;
+    }
+
+    /******************************************
+     * PREPARE INPUT OrtValueS
+     ******************************************/
+    OrtMemoryInfo* cpu_memory_info = nullptr;
+    current_status = ort_api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &cpu_memory_info);
+    CheckOrtStatus(ort_api, current_status, "CreateCpuMemoryInfo");
+    if (!cpu_memory_info || current_status != NULL) {
+        fprintf(stderr, "    ERROR: Failed to create CPU Memory Info.\n");
+        if (current_status) ort_api->ReleaseStatus(current_status);
+        if (allocator) ort_api->ReleaseAllocator(allocator);
+        ort_api->ReleaseEnv(ort_env);
+        return;
+    }
+
+    OrtValue* input_A_val = nullptr;
+    OrtValue* input_B_val = nullptr;
+    OrtValue* input_C_val = nullptr; // For Bias
+    float dummy_c_scalar_data = 0.0f;
+    int64_t dummy_c_dims[] = {}; // Scalar shape
+
+    // Input A
+    current_status = ort_api->CreateTensorWithDataAsOrtValue(cpu_memory_info,
+                                       const_cast<void*>(omTensorGetDataPtr(A_omTensor)),
+                                       omTensorGetNumElems(A_omTensor) * sizeof(float),
+                                       omTensorGetShape(A_omTensor),
+                                       omTensorGetRank(A_omTensor),
+                                       ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &input_A_val);
+    CheckOrtStatus(ort_api, current_status, "CreateTensorWithDataAsOrtValue for A");
+
+    // Input B
+    current_status = ort_api->CreateTensorWithDataAsOrtValue(cpu_memory_info,
+                                       const_cast<void*>(omTensorGetDataPtr(B_omTensor)),
+                                       omTensorGetNumElems(B_omTensor) * sizeof(float),
+                                       omTensorGetShape(B_omTensor),
+                                       omTensorGetRank(B_omTensor),
+                                       ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &input_B_val);
+    CheckOrtStatus(ort_api, current_status, "CreateTensorWithDataAsOrtValue for B");
+
+    // Input C (Bias)
+    if (Bias_omTensor && omTensorGetDataPtr(Bias_omTensor)) {
+        current_status = ort_api->CreateTensorWithDataAsOrtValue(cpu_memory_info,
+                                           const_cast<void*>(omTensorGetDataPtr(Bias_omTensor)),
+                                           omTensorGetNumElems(Bias_omTensor) * sizeof(float),
+                                           omTensorGetShape(Bias_omTensor),
+                                           omTensorGetRank(Bias_omTensor),
+                                           ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &input_C_val);
+        CheckOrtStatus(ort_api, current_status, "CreateTensorWithDataAsOrtValue for Bias/C");
     } else {
-        fprintf(stderr, "    Bias OMTensor is NULL.\n");
+        fprintf(stderr, "    Bias_omTensor is NULL or has no data, providing dummy scalar 0.0f for C input.\n");
+        current_status = ort_api->CreateTensorWithDataAsOrtValue(cpu_memory_info,
+                                           &dummy_c_scalar_data, sizeof(float),
+                                           dummy_c_dims, 0, // Scalar has 0 dimensions
+                                           ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &input_C_val);
+        CheckOrtStatus(ort_api, current_status, "CreateTensorWithDataAsOrtValue for dummy C");
+    }
+
+    if (!input_A_val || !input_B_val || !input_C_val) {
+        fprintf(stderr, "    ERROR: Failed to create one or more input OrtValues.\n");
+        if (input_A_val) ort_api->ReleaseValue(input_A_val);
+        if (input_B_val) ort_api->ReleaseValue(input_B_val);
+        if (input_C_val) ort_api->ReleaseValue(input_C_val);
+        ort_api->ReleaseMemoryInfo(cpu_memory_info);
+        if (allocator) ort_api->ReleaseAllocator(allocator);
+        ort_api->ReleaseEnv(ort_env);
+        return;
+    }
+    std::vector<const OrtValue*> ort_inputs = {input_A_val, input_B_val, input_C_val};
+
+    /******************************************
+     * PREPARE FusedGemm ATTRIBUTES
+     ******************************************/
+    OrtOpAttr* attr_alpha = nullptr;
+    OrtOpAttr* attr_beta = nullptr;
+    OrtOpAttr* attr_transA = nullptr;
+    OrtOpAttr* attr_transB = nullptr;
+    float alpha_val = GEMM_ALPHA; 
+    float beta_val = GEMM_BETA;   
+
+    current_status = ort_api->CreateOpAttr("alpha", &alpha_val, sizeof(float), ORT_OP_ATTR_FLOAT, &attr_alpha);
+    CheckOrtStatus(ort_api, current_status, "CreateOpAttr alpha");
+    current_status = ort_api->CreateOpAttr("beta", &beta_val, sizeof(float), ORT_OP_ATTR_FLOAT, &attr_beta);
+    CheckOrtStatus(ort_api, current_status, "CreateOpAttr beta");
+    current_status = ort_api->CreateOpAttr("transA", &transA_param, sizeof(int64_t), ORT_OP_ATTR_INT, &attr_transA);
+    CheckOrtStatus(ort_api, current_status, "CreateOpAttr transA");
+    current_status = ort_api->CreateOpAttr("transB", &transB_param, sizeof(int64_t), ORT_OP_ATTR_INT, &attr_transB);
+    CheckOrtStatus(ort_api, current_status, "CreateOpAttr transB");
+
+    if (!attr_alpha || !attr_beta || !attr_transA || !attr_transB) {
+        fprintf(stderr, "    ERROR: Failed to create one or more OrtOpAttrs.\n");
+        if(attr_alpha) ort_api->ReleaseOpAttr(attr_alpha);
+        if(attr_beta) ort_api->ReleaseOpAttr(attr_beta);
+        if(attr_transA) ort_api->ReleaseOpAttr(attr_transA);
+        if(attr_transB) ort_api->ReleaseOpAttr(attr_transB);
+        ort_api->ReleaseValue(input_A_val);
+        ort_api->ReleaseValue(input_B_val);
+        ort_api->ReleaseValue(input_C_val);
+        ort_api->ReleaseMemoryInfo(cpu_memory_info);
+        if (allocator) ort_api->ReleaseAllocator(allocator);
+        ort_api->ReleaseEnv(ort_env);
+        return;
+    }
+    std::vector<const OrtOpAttr*> op_attrs = {attr_alpha, attr_beta, attr_transA, attr_transB};
+
+    /******************************************
+     * CREATE FusedGemm OPERATOR & OUTPUT VALUE
+     ******************************************/
+    OrtOp* fused_gemm_op = nullptr;
+    OrtValue* output_Y_gemm_val = nullptr;
+    std::vector<int64_t> output_dims = {M, N}; // Define output_dims here
+
+    current_status = ort_api->CreateOp(nullptr, 
+                                     "FusedGemm", "com.microsoft", 1,
+                                     nullptr, nullptr, 0, 
+                                     op_attrs.data(), op_attrs.size(),
+                                     3, 1, 
+                                     &fused_gemm_op);
+    CheckOrtStatus(ort_api, current_status, "CreateOp FusedGemm");
+
+    if (fused_gemm_op && current_status == NULL) {
+        current_status = ort_api->CreateTensorAsOrtValue(allocator, // Use the obtained allocator
+                                         output_dims.data(), output_dims.size(),
+                                         ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+                                         &output_Y_gemm_val);
+        CheckOrtStatus(ort_api, current_status, "CreateTensorAsOrtValue for FusedGemm output Y_gemm");
+    }
+
+
+    if (!fused_gemm_op || !output_Y_gemm_val || current_status != NULL) {
+        fprintf(stderr, "    ERROR: Failed to create FusedGemm OrtOp or its output OrtValue.\n");
+        if (fused_gemm_op) ort_api->ReleaseOp(fused_gemm_op);
+        if (output_Y_gemm_val) ort_api->ReleaseValue(output_Y_gemm_val);
+    } else {
+        /******************************************
+         * INVOKE FusedGemm OPERATOR
+         ******************************************/
+        fprintf(stderr, "    Invoking ORT FusedGemm operator...\n");
+        fflush(stderr);
+        std::vector<OrtValue*> ort_outputs = {output_Y_gemm_val}; 
+        current_status = ort_api->InvokeOp(nullptr, 
+                                         fused_gemm_op,
+                                         ort_inputs.data(), ort_inputs.size(),
+                                         ort_outputs.data(), ort_outputs.size());
+        CheckOrtStatus(ort_api, current_status, "InvokeOp FusedGemm");
+
+        /******************************************
+         * PROCESS OUTPUT & MANUAL RELU
+         ******************************************/
+        if (current_status == NULL) {
+            float* gemm_result_data_ptr = nullptr;
+            current_status = ort_api->GetTensorMutableData(output_Y_gemm_val, (void**)&gemm_result_data_ptr);
+            CheckOrtStatus(ort_api, current_status, "GetTensorMutableData for FusedGemm output");
+
+            if (current_status == NULL && gemm_result_data_ptr) {
+                float* y_target_data_ptr = static_cast<float*>(omTensorGetDataPtr(Y_omTensor));
+                size_t num_output_elements = omTensorGetNumElems(Y_omTensor); 
+
+                size_t gemm_out_elems = 1;
+                for(int64_t dim_val : output_dims) gemm_out_elems *= static_cast<size_t>(dim_val);
+
+                if (num_output_elements != gemm_out_elems) {
+                    fprintf(stderr, "    ERROR: Mismatch between Y_omTensor elements (%zu) and FusedGemm output elements (%zu).\n", num_output_elements, gemm_out_elems);
+                } else {
+                    memcpy(y_target_data_ptr, gemm_result_data_ptr, num_output_elements * sizeof(float));
+                    fprintf(stderr, "    Applying ReLU manually to FusedGemm output...\n");
+                    for (size_t i = 0; i < num_output_elements; ++i) {
+                        y_target_data_ptr[i] = relu(y_target_data_ptr[i]);
+                    }
+                }
+            }
+        } else {
+            fprintf(stderr, "    Skipping output processing and ReLU due to FusedGemm InvokeOp failure.\n");
+        }
     }
     fflush(stderr);
 
-
     /******************************************
-     * CORE GEMM + BIAS + RELU LOGIC
+     * CLEANUP ONNX RUNTIME RESOURCES
      ******************************************/
-    // Note: This implementation assumes alpha=1.0 and beta=1.0 as per Gemm defaults,
-    // because these attributes are not passed to this custom function.
+    if (fused_gemm_op) ort_api->ReleaseOp(fused_gemm_op);
+    if (output_Y_gemm_val) ort_api->ReleaseValue(output_Y_gemm_val);
+    if (attr_alpha) ort_api->ReleaseOpAttr(attr_alpha);
+    if (attr_beta) ort_api->ReleaseOpAttr(attr_beta);
+    if (attr_transA) ort_api->ReleaseOpAttr(attr_transA);
+    if (attr_transB) ort_api->ReleaseOpAttr(attr_transB);
+    if (input_A_val) ort_api->ReleaseValue(input_A_val);
+    if (input_B_val) ort_api->ReleaseValue(input_B_val);
+    if (input_C_val) ort_api->ReleaseValue(input_C_val);
+    if (cpu_memory_info) ort_api->ReleaseMemoryInfo(cpu_memory_info);
+    if (allocator) ort_api->ReleaseAllocator(allocator);
+    if (ort_env) ort_api->ReleaseEnv(ort_env);
 
-    for (int64_t m = 0; m < M; ++m) {
-        for (int64_t n = 0; n < N; ++n) {
-
-            // --- GEMM Calculation (A' * B') ---
-            float gemm_sum = 0.0f;
-            for (int64_t k = 0; k < K; ++k) {
-                // Determine logical indices based on transpose flags
-                int64_t a_idx_dim0 = transA ? k : m;
-                int64_t a_idx_dim1 = transA ? m : k;
-                int64_t b_idx_dim0 = transB ? n : k;
-                int64_t b_idx_dim1 = transB ? k : n;
-
-                // Calculate physical offsets using strides
-                int64_t offset_a = offset2d(strideA, a_idx_dim0, a_idx_dim1);
-                int64_t offset_b = offset2d(strideB, b_idx_dim0, b_idx_dim1);
-
-                // Accumulate product
-                gemm_sum += A_data[offset_a] * B_data[offset_b];
-            } // End K loop
-
-            // --- Bias Addition (gemm_sum + C/Bias) ---
-            // Implements unidirectional broadcasting for C/Bias to shape (M, N)
-            bool biasIsValid = (Bias_data && strideBias && dimsBias);
-            float bias_val = 0.0f;
-            if (biasIsValid) {
-              switch (biasRank) {
-                case 0:
-                  bias_val = Bias_data[0];
-                  break;
-                case 1:
-                  // length == N? broadcast across rows
-                  if (dimsBias[0] == N)
-                    bias_val = Bias_data[offset1d(strideBias, n)];
-                  // length == M? broadcast across cols
-                  else if (dimsBias[0] == M)
-                    bias_val = Bias_data[offset1d(strideBias, m)];
-                  // length == 1? scalar
-                  else if (dimsBias[0] == 1)
-                    bias_val = Bias_data[0];
-                  else
-                    fprintf(stderr, "[FusedGemm] Bad 1D bias length %lld\n", (long long)dimsBias[0]);
-                  break;
-                case 2:
-                  if (dimsBias[0] == M && dimsBias[1] == N)
-                    bias_val = Bias_data[offset2d(strideBias, m, n)];
-                  else if (dimsBias[0] == 1 && dimsBias[1] == N)
-                    bias_val = Bias_data[offset2d(strideBias, 0, n)];
-                  else if (dimsBias[0] == M && dimsBias[1] == 1)
-                    bias_val = Bias_data[offset2d(strideBias, m, 0)];
-                  else if (dimsBias[0] == 1 && dimsBias[1] == 1)
-                    bias_val = Bias_data[0];
-                  else
-                    fprintf(stderr, "[FusedGemm] Bad 2D bias shape %lldx%lld\n",
-                            (long long)dimsBias[0], (long long)dimsBias[1]);
-                  break;
-                default:
-                  fprintf(stderr, "[FusedGemm] Unsupported bias rank %d\n", biasRank);
-              }
-            }
-            // Assuming beta = 1.0 for Bias/C
-            float biased_sum = gemm_sum + bias_val;
-
-            // --- ReLU Activation ---
-            float final_result = relu(biased_sum);
-
-            // --- Store Result in Output Tensor Y ---
-            // Calculate output offset using strides
-            int64_t offset_y = offset2d(strideY, m, n);
-            Y_data[offset_y] = final_result;
-
-        } // End N loop
-    } // End M loop
-
-    /******************************************
-     * FINAL LOGGING
-     ******************************************/
-    // std::cout << ">>> Finished C++ Placeholder: ort_cpu_ep_fused_gemm <<<" << std::endl; // Less critical logging
-    fprintf(stderr, ">>> Finished C++ ort_cpu_ep_fused_gemm (OMTensor version) <<<\n");
+    fprintf(stderr, ">>> Finished C++ ort_cpu_ep_fused_gemm (ORT Direct Call Wrapper) <<<\n");
     fflush(stderr);
 }
