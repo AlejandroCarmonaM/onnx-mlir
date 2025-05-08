@@ -151,9 +151,8 @@ if __name__ == "__main__":
             opset_version=11,             # the ONNX version to export the model to
             do_constant_folding=True,     # whether to execute constant folding for optimization
             input_names=['input'],        # the model's input names
-            output_names=['output'],      # the model's output names
-            dynamic_axes={'input': {0: 'batch_size'}, # variable length axes
-                          'output': {0: 'batch_size'}}
+            output_names=['output']       # the model's output names
+            # dynamic_axes removed to hardcode batch size based on tracing_input_fp32
         )
         print(f"✅ Successfully exported initial FP32 ONNX model to {ONNX_FP32_PATH}")
     except Exception as e:
