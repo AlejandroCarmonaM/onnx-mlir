@@ -70,11 +70,13 @@ public:
 
     ValueRange returns = op->getResults();
     if (returns.size() == 0) {
+      // For sure it goes through here
       // There is no return
       FlatSymbolRefAttr callRef =
           create.llvm.getOrInsertSymbolRef(module, krnlCallOp.getFuncName(),
               LLVM::LLVMVoidType::get(module.getContext()), parameterTypeList);
       create.llvm.call({}, callRef, parameterList);
+      //exit(1); It exits for FusedGemm
 
       rewriter.eraseOp(op);
     } else {
@@ -88,6 +90,7 @@ public:
       auto llvmCall =
           create.llvm.call({llvmReturnType}, callRef, parameterList);
       rewriter.replaceOp(op, llvmCall.getDefiningOp()->getResults()[0]);
+      //exit(1);
     }
 
     // Destroy OMTensor wrappers of parameters.

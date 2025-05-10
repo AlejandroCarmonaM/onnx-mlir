@@ -37,28 +37,57 @@ struct ONNXCustomOpLowering : public OpConversionPattern<ONNXCustomOp> {
         create(rewriter, loc);
     IndexExprScope scope(create.krnlIE);
 
-    // Get shape.
-    ONNXCustomOpShapeHelper shapeHelper(op, operands, &create.krnlIE);
-    shapeHelper.computeShapeAndAssertOnFailure();
-
-    // Prepare outputs for krnl.call
+    // Get function_name attribute.
+    std::string functionName = customOp.getFunctionName().str();
     SmallVector<Type, 4> outputMemRefTypes;
     SmallVector<Value, 4> outputAllocs;
-    for (size_t idx = 0; idx < op->getResultTypes().size(); idx++) {
-      Type ty = op->getResultTypes()[idx];
-      MemRefType outputMemRefType =
-          mlir::cast<MemRefType>(typeConverter->convertType(ty));
-      outputMemRefTypes.emplace_back(outputMemRefType);
-      Value alloc = create.mem.alignedAlloc(
-          outputMemRefType, shapeHelper.getOutputDims(idx));
+
+    bool handled = false;
+    if (functionName == "FusedGemm") {
+      // Manually infer output shape for FusedGemm without shape helper.
+      Type ty = op->getResultTypes()[0];
+      auto outTensorTy = mlir::dyn_cast<mlir::RankedTensorType>(ty);
+      if (!outTensorTy)
+        return rewriter.notifyMatchFailure(op, "FusedGemm result must be a ranked tensor");
+      int rank = outTensorTy.getRank();
+      // Build IndexExpr dims.
+      SmallVector<IndexExpr, 4> outputDims;
+      Value a = operands[0];
+      for (int i = 0; i < rank; ++i) {
+        int64_t dim = outTensorTy.getDimSize(i);
+        if (mlir::ShapedType::isDynamic(dim))
+          outputDims.emplace_back(create.krnlIE.getShapeAsDim(a, i));
+        else
+          outputDims.emplace_back(LiteralIndexExpr(dim));
+      }
+      // Allocate output memref.
+      auto memRefType = mlir::cast<mlir::MemRefType>(typeConverter->convertType(ty));
+      outputMemRefTypes.emplace_back(memRefType);
+      Value alloc = create.mem.alignedAlloc(memRefType, outputDims);
       outputAllocs.emplace_back(alloc);
+      handled = true;
+    }
+
+    if (!handled) {
+      // Default: try shape helper, as before
+      ONNXCustomOpShapeHelper shapeHelper(op, operands, &create.krnlIE);
+      if (failed(shapeHelper.computeShape())) {
+        // If shape inference fails, emit a runtime error or fallback
+        return rewriter.notifyMatchFailure(op, "Shape inference failed for custom op");
+      }
+      for (size_t idx = 0; idx < op->getResultTypes().size(); idx++) {
+        Type ty = op->getResultTypes()[idx];
+        MemRefType outputMemRefType =
+            mlir::cast<MemRefType>(typeConverter->convertType(ty));
+        outputMemRefTypes.emplace_back(outputMemRefType);
+        Value alloc = create.mem.alignedAlloc(
+            outputMemRefType, shapeHelper.getOutputDims(idx));
+        outputAllocs.emplace_back(alloc);
+      }
     }
 
     // Lower to Krnl for special CustomOp
     // Create Krnl.Call
-
-    // Handle the attributes: exclude the attributes used for analysis
-    // function_name is passed explicitly. Others may include shape inference
     std::vector<std::string> excludeStrings = {"function_name",
         "shape_infer_pattern", "inputs_for_infer", "output_element_type"};
     std::vector<std::string> attributeNames;
@@ -71,7 +100,10 @@ struct ONNXCustomOpLowering : public OpConversionPattern<ONNXCustomOp> {
     rewriter.create<KrnlCallOp>(loc, customOp.getFunctionName().str(),
         outputAllocs, op, operands, attributeNames);
 
-    rewriter.replaceOp(op, outputAllocs);
+    if (op->getNumResults() > 0)
+      rewriter.replaceOp(op, outputAllocs);
+    else
+      rewriter.eraseOp(op);
     return success();
   }
 };
