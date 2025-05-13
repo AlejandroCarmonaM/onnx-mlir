@@ -6,7 +6,9 @@ module attributes {llvm.data_layout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i6
     %2 = "krnl.global"() {name = "constant_2", shape = [10, 128], value = [...] : tensor<10x128xf32>} : () -> memref<10x128xf32>
     %3 = "krnl.global"() {name = "constant_3", shape = [10], value = dense<[0.0835401713, -0.373944432, 0.206879765, 0.180731401, -0.428273022, 0.313445568, 0.191657051, 0.136042759, -0.325663328, -0.49137786]> : tensor<10xf32>} : () -> memref<10xf32>
     %alloc = memref.alloc() {alignment = 16 : i64} : memref<1x128xf32>
-    "krnl.call"(%alloc, %arg0, %0, %1) {activation = "Relu", alpha = 1.000000e+00 : f32, beta = 1.000000e+00 : f32, domain_name = "com.microsoft", funcName = "FusedGemm", numOfOutput = 1 : si64, onnx_node_name = "fused /fc1/Gemm", transA = 0 : si64, transB = 1 : si64} : (memref<1x128xf32>, memref<1x784xf32>, memref<128x784xf32>, memref<128xf32>) -> ()
+    "krnl.call"(%alloc, %arg0, %0, %1) {activation = "Relu", alpha = 1.000000e+00 : f32, beta = 1.000000e+00 : f32,
+    domain_name = "com.microsoft", funcName = "FusedGemm", numOfOutput = 1 : si64, onnx_node_name = "fused /fc1/Gemm",
+    transA = 0 : si64, transB = 1 : si64} : (memref<1x128xf32>, memref<1x784xf32>, memref<128x784xf32>, memref<128xf32>) -> ()
     %alloc_0 = memref.alloc() {alignment = 128 : i64} : memref<1x10xf32>
     affine.for %arg1 = 0 to 1 {
       affine.for %arg2 = 0 to 10 {

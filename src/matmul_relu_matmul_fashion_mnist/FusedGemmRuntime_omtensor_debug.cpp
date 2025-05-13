@@ -6,6 +6,8 @@
 #include <cmath>    // For std::max
 #include <iostream> // For std::cout, std::endl (placeholder logging)
 #include <cstdio>   // For fprintf, stdout, fflush (debug logging)
+#include <cstring>
+#include <ctime> // For time(0)
 
 // ONNX-MLIR Runtime API
 #include "OnnxMlirRuntime.h"
@@ -83,14 +85,36 @@ inline int64_t offset1d(const int64_t* strides, int64_t i) {
  * Returns:
  *    - void: Output Y is modified in place.
  */
-extern "C" void ort_cpu_ep_fused_gemm(
+
+/*    MemRefType_float_2 *output,
+   MemRefType_float_2 *A,
+   MemRefType_float_2 *B,
+   MemRefType_float_1 *C,
+   const char *activation,
+   float alpha,
+   float beta,
+   const char *domain_name,
+   const char *funcName,
+   int64_t numOfOutput,
+   const char *onnx_node_name,
+   int64_t transA,
+   int64_t transB*/
+// ...existing code...
+/*    "krnl.call"(%alloc, %arg0, %0, %1) {activation = "Relu", alpha = 1.000000e+00 : f32, beta = 1.000000e+00 : f32, domain_name = "com.microsoft", funcName = "FusedGemm", numOfOutput = 1 : si64, onnx_node_name = "fused /fc1/Gemm", transA = 0 : si64, transB = 1 : si64} : (memref<1x128xf32>, memref<1x784xf32>, memref<128x784xf32>, memref<128xf32>) -> ()*/
+
+
+extern "C" void FusedGemm(
+    OMTensor* Y_omTensor,
     OMTensor* A_omTensor,
     OMTensor* B_omTensor,
     OMTensor* Bias_omTensor, // Corresponds to Gemm's 'C' input
-    OMTensor* Y_omTensor,
-    int64_t M,
-    int64_t N,
-    int64_t K,
+    const char *activation,
+    float alpha,
+    float beta,
+    const char *domain_name,
+    //const char *funcName,
+    //int64_t numOfOutput,
+    const char *onnx_node_name,
     int64_t transA,
     int64_t transB
 ) {
@@ -107,6 +131,17 @@ extern "C" void ort_cpu_ep_fused_gemm(
     fprintf(stdout, "Error: Input tensors must be of type float.\n");
     return;
   }
+
+  // Get shapes
+  const int64_t* A_shape = omTensorGetShape(A_omTensor);
+  const int64_t* B_shape = omTensorGetShape(B_omTensor);
+  const int64_t* Y_shape = omTensorGetShape(Y_omTensor);
+
+  // Assume 2D tensors
+  int64_t M = Y_shape[0];
+  int64_t N = Y_shape[1];
+  int64_t K = transA ? A_shape[0] : A_shape[1];
+
   // Check if dimensions are valid
   if (M <= 0 || N <= 0 || K <= 0) {
     fprintf(stdout, "Error: Invalid dimensions M=%lld, N=%lld, K=%lld.\n", M, N, K);
@@ -128,52 +163,105 @@ extern "C" void ort_cpu_ep_fused_gemm(
     }
   }
   // Check if Bias tensor is valid (if provided)
-  //const int64_t* Bias_strides;
-   fprintf(stdout, "################################Bias tensor provided.\n");
-   const int64_t* Bias_strides = omTensorGetStrides(Bias_omTensor);
+  const int64_t* Bias_strides = nullptr;
+  if (Bias_omTensor) {
+    Bias_strides = omTensorGetStrides(Bias_omTensor);
     if (!Bias_strides) {
       fprintf(stdout, "Error: Bias tensor has null strides.\n");
       return;
     }
     // Check if Bias strides are non-negative
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < omTensorGetRank(Bias_omTensor); ++i) {
       if (Bias_strides[i] < 0) {
         fprintf(stdout, "Error: Bias strides must be non-negative.\n");
         return;
       }
     }
+  }
 
   // LOGGING
   fprintf(stdout, "FusedGemm called with:\n");
   fprintf(stdout, "  A_omTensor: rank=%d, dtype=%d, shape=[%lld,%lld], strides=[%lld,%lld]\n",
           omTensorGetRank(A_omTensor),
           omTensorGetDataType(A_omTensor),
-          omTensorGetShape(A_omTensor)[0],
-          omTensorGetShape(A_omTensor)[1],
+          A_shape[0], A_shape[1],
           A_strides[0], A_strides[1]);
   fprintf(stdout, "  B_omTensor: rank=%d, dtype=%d, shape=[%lld,%lld], strides=[%lld,%lld]\n",
           omTensorGetRank(B_omTensor),
           omTensorGetDataType(B_omTensor),
-          omTensorGetShape(B_omTensor)[0],
-          omTensorGetShape(B_omTensor)[1],
+          B_shape[0], B_shape[1],
           B_strides[0], B_strides[1]);
   fprintf(stdout, "  Y_omTensor: rank=%d, dtype=%d, shape=[%lld,%lld], strides=[%lld,%lld]\n",
           omTensorGetRank(Y_omTensor),
           omTensorGetDataType(Y_omTensor),
-          omTensorGetShape(Y_omTensor)[0],
-          omTensorGetShape(Y_omTensor)[1],
+          Y_shape[0], Y_shape[1],
           Y_strides[0], Y_strides[1]);
-   if (Bias_omTensor) {
-      fprintf(stdout, "  Bias_omTensor: rank=%d, dtype=%d, shape=[%lld,%lld], strides=[%lld,%lld]\n",
-              omTensorGetRank(Bias_omTensor),
-              omTensorGetDataType(Bias_omTensor),
-              omTensorGetShape(Bias_omTensor)[0],
-              omTensorGetShape(Bias_omTensor)[1],
-              Bias_strides[0], Bias_strides[1]);
-    }
+  if (Bias_omTensor) {
+    const int64_t* Bias_shape = omTensorGetShape(Bias_omTensor);
+    fprintf(stdout, "  Bias_omTensor: rank=%d, dtype=%d, shape=[%lld,%lld], strides=[%lld,%lld]\n",
+            omTensorGetRank(Bias_omTensor),
+            omTensorGetDataType(Bias_omTensor),
+            Bias_shape[0], omTensorGetRank(Bias_omTensor) > 1 ? Bias_shape[1] : 1,
+            Bias_strides[0], omTensorGetRank(Bias_omTensor) > 1 ? Bias_strides[1] : 1);
+  }
+  //transB = 1;
   fprintf(stdout, "  M=%lld, N=%lld, K=%lld, transA=%lld, transB=%lld\n",
           M, N, K, transA, transB);
   fflush(stdout); // Ensure all logs are flushed immediately
-  // END LOGGING
-  exit(EXIT_SUCCESS); // Placeholder for actual implementation
+                  // END LOGGING
+  //exit(0); // DEBUGGING: Exit after logging
+  // Get raw pointers
+  float *A_data = reinterpret_cast<float *>(omTensorGetDataPtr(A_omTensor));
+  float *B_data = reinterpret_cast<float *>(omTensorGetDataPtr(B_omTensor));
+  float *Y_data = reinterpret_cast<float *>(omTensorGetDataPtr(Y_omTensor));
+  float *Bias_data = Bias_omTensor ? reinterpret_cast<float *>(
+                                         omTensorGetDataPtr(Bias_omTensor))
+                                   : nullptr;
+
+  /*int64_t bias_rank = Bias_omTensor ? omTensorGetRank(Bias_omTensor) : 0;
+
+  // Compute Y = alpha * A·B  + beta * Bias  then ReLU
+  for (int64_t i = 0; i < M; ++i) {
+    for (int64_t j = 0; j < N; ++j) {
+      float sum = 0.0f;
+      for (int64_t k = 0; k < K; ++k) {
+        float a = transA
+          ? A_data[offset2d(A_strides, k, i)]
+          : A_data[offset2d(A_strides, i, k)];
+        float b = transB
+          ? B_data[offset2d(B_strides, j, k)]
+          : B_data[offset2d(B_strides, k, j)];
+        // <-- accumulate, not assign
+        sum += a * b;
+      }
+      sum *= alpha;
+      if (Bias_data) {
+        float bval = (bias_rank == 1)
+          ? Bias_data[offset1d(Bias_strides, j)]
+          : Bias_data[offset2d(Bias_strides, i, j)];
+        // <-- accumulate bias, not overwrite
+        sum += beta * bval;
+      }
+      if (activation && strcmp(activation, "Relu") == 0)
+        sum = relu(sum);
+      Y_data[offset2d(Y_strides, i, j)] = sum;
+    }
+  }*/
+ // Let's randomize the data for testing
+     // Seed the random number generator
+  srand(static_cast<unsigned int>(time(0)));
+  for (int64_t i = 0; i < M; ++i) {
+    for (int64_t j = 0; j < N; ++j) {
+        Y_data[offset2d(Y_strides, i, j)] = static_cast<float>(rand()) / RAND_MAX;
+    }
+  }
+  // DEBUGGING
+  fprintf(stdout, "FusedGemm completed successfully.\n");
+  fflush(stdout); // Ensure all logs are flushed immediately
+
 }
+
+// ...existing code...
+
+// It seems it is actually working
+// as the predictions change from test to test
