@@ -38,8 +38,8 @@ IMG_SHAPE = (1, 28, 28)
 NUM_CLASSES = 10
 
 # Benchmark configuration
-NUM_ITERATIONS = 10
-WARMUP_ITERATIONS = 1  # Number of warmup iterations
+NUM_ITERATIONS = 500
+WARMUP_ITERATIONS = 100  # Number of warmup iterations
 
 # Class names for interpretation
 CLASS_NAMES = ['T-shirt/top', 'Trouser', 'Pullover', 'Dress', 'Coat',

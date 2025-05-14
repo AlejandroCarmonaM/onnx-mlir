@@ -38,8 +38,8 @@ IMG_SHAPE = (1, 28, 28)
 NUM_CLASSES = 10
 
 # Benchmark configuration
-NUM_ITERATIONS = 10
-WARMUP_ITERATIONS = 1  # Number of warmup iterations
+NUM_ITERATIONS = 500
+WARMUP_ITERATIONS = 100  # Number of warmup iterations
 
 # Class names for interpretation
 CLASS_NAMES = ['T-shirt/top', 'Trouser', 'Pullover', 'Dress', 'Coat',
@@ -194,82 +194,6 @@ if __name__ == "__main__":
         print(f"❌ Failed to create ONNX session or apply optimizations: {e}")
         exit(1)
 
-    #########################################
-    # BENCHMARK PREPARATION #################
-    #########################################
-    print(f"Preloading {NUM_ITERATIONS} test samples for benchmarking...")
-    test_samples = []
-    test_loader_iter = iter(test_loader)
-
-    # Preload data samples as NumPy arrays for direct ONNX Runtime inference
-    for _ in range(NUM_ITERATIONS + WARMUP_ITERATIONS): # Preload enough for warmup + benchmark
-        try:
-            img, label = next(test_loader_iter)
-        except StopIteration:
-            test_loader_iter = iter(test_loader)
-            img, label = next(test_loader_iter)
-
-        img_np = img.reshape(BATCH_SIZE, FEATURE_DIM).numpy().astype(np.float32) # Flatten and convert
-        label_np = label.numpy()
-        test_samples.append((img_np, label_np))
-
-    print(f"Preloaded {len(test_samples)} samples.")
-
-    # Get input name from the session
-    input_name = onnx_session.get_inputs()[0].name
-
-    #########################################
-    # BENCHMARKING ##########################
-    #########################################
-    print(f"\nRunning benchmark with CPU Execution Provider...")
-    total_time = 0
-    correct_predictions = 0
-
-    # --- Warmup Phase ---
-    print(f"Starting {WARMUP_ITERATIONS} warmup iterations...")
-    for i in range(WARMUP_ITERATIONS):
-        img_np, _ = test_samples[i]
-        _ = onnx_session.run(None, {input_name: img_np})
-    print(f"Completed {WARMUP_ITERATIONS} warmup iterations.")
-
-    # --- Benchmarking Phase ---
-    print(f"Starting {NUM_ITERATIONS} benchmarking iterations...")
-    start_index = WARMUP_ITERATIONS # Start after warmup samples
-    for i in range(NUM_ITERATIONS):
-        sample_index = start_index + i
-        img_np, label_np = test_samples[sample_index]
-
-        # Time ONLY the inference call
-        time_start = time.time()
-        outputs = onnx_session.run(None, {input_name: img_np})
-        time_end = time.time()
-
-        # Accumulate time
-        total_time += (time_end - time_start)
-
-        # Process prediction (outside timing)
-        pred = np.argmax(outputs[0], axis=1)
-        if pred == label_np:
-            correct_predictions += 1
-
-    print(f"Completed {NUM_ITERATIONS} benchmarking iterations.")
-
-    #########################################
-    # RESULTS REPORTING #####################
-    #########################################
-    print("\n======= CPU BENCHMARK RESULTS =======")
-    if NUM_ITERATIONS > 0:
-        avg_time_ms = (total_time / NUM_ITERATIONS) * 1000
-        accuracy = (correct_predictions / NUM_ITERATIONS) * 100
-        throughput = 1.0 / (total_time / NUM_ITERATIONS) if total_time > 0 else 0
-
-        print(f"Execution Provider: {EXECUTION_PROVIDER}")
-        print(f"Total Samples: {NUM_ITERATIONS}")
-        print(f"Accuracy: {accuracy:.2f}%")
-        print(f"Avg. Inference Time: {avg_time_ms:.3f} ms")
-        print(f"Throughput: {throughput:.2f} inferences/second")
-    else:
-        print("No benchmark iterations run.")
-
-    print(f"\nOptimized ONNX model saved at: {OPTIMIZED_ONNX_FP32_PATH}")
+    print(f"\nExport complete. Vanilla ONNX model: {ONNX_FP32_PATH}")
+    print(f"Optimized ONNX model: {OPTIMIZED_ONNX_FP32_PATH}")
     print("Script finished.")
