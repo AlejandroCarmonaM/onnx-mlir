@@ -44,24 +44,67 @@ struct ONNXCustomOpLowering : public OpConversionPattern<ONNXCustomOp> {
 
     bool handled = false;
     if (functionName == "FusedGemm") {
-      // Manually infer output shape for FusedGemm without shape helper.
-      Type ty = op->getResultTypes()[0];
-      auto outTensorTy = mlir::dyn_cast<mlir::RankedTensorType>(ty);
-      if (!outTensorTy)
+      // Output of FusedGemm is Y = A X B + C (where X is matmul)
+      // Output shape is (M, N)
+      // M is derived from input A (operands[0]) and transA attribute.
+      // N is derived from input B (operands[1]) and transB attribute.
+
+      Type outputTensorMLIRType = op->getResultTypes()[0];
+      auto rankedOutputTensorType = mlir::dyn_cast<mlir::RankedTensorType>(outputTensorMLIRType);
+
+      if (!rankedOutputTensorType)
         return rewriter.notifyMatchFailure(op, "FusedGemm result must be a ranked tensor");
-      int rank = outTensorTy.getRank();
-      // Build IndexExpr dims.
+
+      if (rankedOutputTensorType.getRank() != 2)
+        return rewriter.notifyMatchFailure(op, "FusedGemm result is expected to be a 2D tensor");
+
+      // Get attributes
+      IntegerAttr transAAttr = customOp->getAttrOfType<IntegerAttr>("transA");
+      IntegerAttr transBAttr = customOp->getAttrOfType<IntegerAttr>("transB");
+
+      // FusedGemm expects transA and transB attributes.
+      if (!transAAttr || !transBAttr)
+        return rewriter.notifyMatchFailure(op, "FusedGemm is missing transA or transB attribute");
+
+      // Use getValue().getSExtValue() for potentially signed integers,
+      // or check the type more carefully if it could be unsigned.
+      // For boolean conversion from 0 or 1, checking non-zero is fine.
+      bool transA = (transAAttr.getValue().getSExtValue() != 0);
+      bool transB = (transBAttr.getValue().getSExtValue() != 0);
+
+      Value inputA = operands[0]; // Corresponds to %arg0 in ONNXIR
+      Value inputB = operands[1]; // Corresponds to %0 in ONNXIR
+
       SmallVector<IndexExpr, 4> outputDims;
-      Value a = operands[0];
-      for (int i = 0; i < rank; ++i) {
-        int64_t dim = outTensorTy.getDimSize(i);
-        if (mlir::ShapedType::isDynamic(dim))
-          outputDims.emplace_back(create.krnlIE.getShapeAsDim(a, i));
-        else
-          outputDims.emplace_back(LiteralIndexExpr(dim));
+
+      // Determine M (output dimension 0)
+      int64_t dimM_size = rankedOutputTensorType.getDimSize(0);
+      if (mlir::ShapedType::isDynamic(dimM_size)) {
+        if (transA) { // M = A.shape[1]
+          outputDims.emplace_back(create.krnlIE.getShapeAsDim(inputA, 1));
+        } else { // M = A.shape[0]
+          outputDims.emplace_back(create.krnlIE.getShapeAsDim(inputA, 0));
+        }
+      // If M is static, use the static size.
+      } else {
+        outputDims.emplace_back(LiteralIndexExpr(dimM_size));
       }
+
+      // Determine N (output dimension 1)
+      int64_t dimN_size = rankedOutputTensorType.getDimSize(1);
+      if (mlir::ShapedType::isDynamic(dimN_size)) {
+        if (transB) { // N = B.shape[0]
+          outputDims.emplace_back(create.krnlIE.getShapeAsDim(inputB, 0));
+        } else { // N = B.shape[1]
+          outputDims.emplace_back(create.krnlIE.getShapeAsDim(inputB, 1));
+        }
+      // If N is static, use the static size.
+      } else {
+        outputDims.emplace_back(LiteralIndexExpr(dimN_size));
+      }
+
       // Allocate output memref.
-      auto memRefType = mlir::cast<mlir::MemRefType>(typeConverter->convertType(ty));
+      auto memRefType = mlir::cast<mlir::MemRefType>(typeConverter->convertType(outputTensorMLIRType));
       outputMemRefTypes.emplace_back(memRefType);
       Value alloc = create.mem.alignedAlloc(memRefType, outputDims);
       outputAllocs.emplace_back(alloc);
