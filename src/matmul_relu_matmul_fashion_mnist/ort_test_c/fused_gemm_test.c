@@ -1,3 +1,11 @@
+// Filename: fused_gemm_test.c
+// /* Description:
+//  * This file implements a test for the FusedGemm operator using ONNX Runtime C API.
+//  * It creates input tensors, sets up the operator attributes, and invokes the operator.
+//  * The output tensor is printed to the console.
+//  * It does compile but has not been tested in runtime yet. So IT MAY NOT WORK (~99% doesn't work, but it 
+//  * shows how to link the ONNX Runtime C API in compile_onnxrt_program.sh and use some of the C API funcs).
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <onnxruntime_c_api.h>

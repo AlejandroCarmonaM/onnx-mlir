@@ -1,3 +1,10 @@
+// Filename: FusedGemmRuntime_omtensor.cpp
+/* Description:
+ * This file implements a custom FusedGemm runtime function for ONNX-MLIR.
+ * It provides a C++ implementation of a fused Gemm (matrix multiplication + bias + ReLU)
+ * using the OMTensor API, supporting bias broadcasting and optional activation.
+ * IT DOES NOT WORK YET.
+ */
 /**********************************************
  * IMPORT LIBRARIES
  **********************************************/

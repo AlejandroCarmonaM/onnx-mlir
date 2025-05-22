@@ -1,3 +1,13 @@
+# Filename: onnx_any_ep_export_bench.py
+"""
+Description:
+This script benchmarks a FashionMNIST ONNX model by:
+  - Compiling the model with ONNX-MLIR (including a custom FusedGemm runtime in C++)
+  - Running inference via the onnx-mlir's RunONNXModel.py helper script across warmup and benchmark iterations
+  - Measuring inference latency, throughput, and accuracy
+  - Saving per-run input/output files for inspection and debugging
+"""
+
 ##############################################
 # IMPORT LIBRARIES ###########################
 ##############################################
@@ -38,6 +48,8 @@ ONNX_MLIR_PATH = "onnx-mlir" # Assumes onnx-mlir executable is in PATH or provid
 RUN_ONNX_MODEL_SCRIPT_PATH = "/workdir/onnx-mlir/utils/RunONNXModel.py" # Absolute path to the script
 # Directory to store temporary files for each inference run, created in the script's CWD
 INFERENCE_TEMP_DIR_BASE = "onnx_mlir_inference_runs"
+CPP_RUNTIME_PATH = "FusedGemmRuntime_omtensor.cpp" # Path to the C++ runtime file
+LIBRARY_PATH = "libFusedGemmRuntime_omtensor.so" # Name of the compiled shared library
 
 # Dataset configuration
 BATCH_SIZE = 1
@@ -104,11 +116,9 @@ def find_script(name, default_path):
     print(f"❌ Error: Script '{name}' not found at '{default_path}' (abs: {absolute_path}). Please provide the correct path.")
     sys.exit(1) # Exit if script not found
 
-# ...existing code...
-
 def compile_onnx_model(onnx_model_path, output_dir, onnx_mlir_exec_path):
     """
-    Compiles an ONNX model using onnx-mlir, then compiles and links with FusedGemmRuntime_omtensor.cpp.
+    Compiles an ONNX model using onnx-mlir, then compiles and links with CPP_RUNTIME_PATH.
     """
     print(f"Compiling ONNX model '{onnx_model_path}' with onnx-mlir...")
     absolute_onnx_model_path = os.path.abspath(onnx_model_path)
@@ -155,10 +165,10 @@ def compile_onnx_model(onnx_model_path, output_dir, onnx_mlir_exec_path):
         print(f"❌ Error: ONNX-MLIR object emission failed: {e}")
         return False, None
 
-    # Step 2: Compile FusedGemmRuntime_omtensor.cpp to shared library
-    fused_cpp = os.path.abspath("FusedGemmRuntime_omtensor.cpp")
+    # Step 2: Compile CPP_RUNTIME_PATH to shared library
+    fused_cpp = os.path.abspath(CPP_RUNTIME_PATH)
     # Output .so directly into the COMPILED_MODEL_DIR for simplicity in linking step 3
-    fused_so = os.path.join(absolute_output_dir, "libFusedGemmRuntime_omtensor.so")
+    fused_so = os.path.join(absolute_output_dir, LIBRARY_PATH)
     
     onnx_mlir_include = "/workdir/onnx-mlir/include" # For OnnxMlirRuntime.h
     # Adjust these paths if your ONNX Runtime installation is different
@@ -166,7 +176,7 @@ def compile_onnx_model(onnx_model_path, output_dir, onnx_mlir_exec_path):
     onnx_runtime_lib_dir = "/workdir/onnxruntime-linux-x64-gpu-1.21.1/lib"
 
     if not os.path.exists(fused_cpp):
-        print(f"❌ Error: FusedGemmRuntime_omtensor.cpp not found at {fused_cpp}")
+        print(f"❌ Error: {CPP_RUNTIME_PATH} not found at {fused_cpp}")
         return False, None
     
     clang_compile_cmd = [
@@ -180,24 +190,24 @@ def compile_onnx_model(onnx_model_path, output_dir, onnx_mlir_exec_path):
         "-lonnxruntime",                 # Link against libonnxruntime
         f"-Wl,-rpath,{onnx_runtime_lib_dir}" # Embed rpath to find libonnxruntime.so
     ]
-    print(f"Compiling FusedGemmRuntime_omtensor.cpp: {' '.join(clang_compile_cmd)}")
+    print(f"Compiling {CPP_RUNTIME_PATH}: {' '.join(clang_compile_cmd)}")
     try:
         result = subprocess.run(clang_compile_cmd, check=True, capture_output=True, text=True, timeout=120)
-        print("✅ FusedGemmRuntime_omtensor.cpp compilation successful.")
+        print(f"✅ {CPP_RUNTIME_PATH} compilation successful.")
         if not os.path.exists(fused_so):
             print(f"❌ Error: Compiled shared library '{fused_so}' not found after successful compilation command.")
             print("Compiler Stdout:\n", result.stdout) # Should not happen if check=True
             print("Compiler Stderr:\n", result.stderr) # Should not happen if check=True
             return False, None
     except subprocess.CalledProcessError as e:
-        print(f"❌ Error: FusedGemmRuntime_omtensor.cpp compilation failed with CalledProcessError.")
+        print(f"❌ Error: {CPP_RUNTIME_PATH} compilation failed with CalledProcessError.")
         print(f"Command: {' '.join(e.cmd)}")
         print("Return code:", e.returncode)
         print("Compiler Stdout:\n", e.stdout)
         print("Compiler Stderr:\n", e.stderr)
         return False, None
     except Exception as e:
-        print(f"❌ Error: FusedGemmRuntime_omtensor.cpp compilation failed with an unexpected Exception: {e}")
+        print(f"❌ Error: {CPP_RUNTIME_PATH} compilation failed with an unexpected Exception: {e}")
         return False, None
 
     # Step 3: Link ONNX-MLIR object and FusedGemmRuntime_omtensor.so into final model.so
@@ -208,12 +218,12 @@ def compile_onnx_model(onnx_model_path, output_dir, onnx_mlir_exec_path):
         "-o", expected_lib_path,
         "-shared", "-fPIC",
         "-L/workdir/onnx-mlir/build/Debug/lib", "-lcruntime",
-        # Add rpath for libFusedGemmRuntime_omtensor.so if it's in a different directory than model.so
+        # Add rpath for LIBRARY_PATH if it's in a different directory than model.so
         # Since we are placing fused_so in absolute_output_dir (same as expected_lib_path),
         # an rpath like '$ORIGIN' might be implicitly enough or not needed if system linker paths are set.
         # For robustness, if fused_so were elsewhere, an rpath would be good.
         # Here, they are in the same directory.
-        # Also, ensure model.so can find libonnxruntime.so (via libFusedGemmRuntime_omtensor.so's rpath)
+        # Also, ensure model.so can find libonnxruntime.so (via LIBRARY_PATH's rpath)
     ]
     print(f"Linking model and FusedGemmRuntime_omtensor.so: {' '.join(clang_link_cmd)}")
     try:
@@ -235,8 +245,6 @@ def compile_onnx_model(onnx_model_path, output_dir, onnx_mlir_exec_path):
     except Exception as e:
         print(f"❌ Error: Linking failed: {e}")
         return False, None
-
-# ...existing code...
 
 def run_inference_with_script(run_script_path, compiled_model_dir_path, input_data_list, output_dir):
     """

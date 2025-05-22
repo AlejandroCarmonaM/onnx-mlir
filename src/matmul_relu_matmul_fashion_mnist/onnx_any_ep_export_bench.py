@@ -1,3 +1,10 @@
+# Filename: onnx_any_ep_export_bench.py
+"""
+ Description: 
+ This script benchmarks an ONNX model using ONNX Runtime with an Execution Provider, CPUExecutionProvider by default.
+ It also export the model (mnist_model_cpu_initial.onnx) both before and after optimization (mnist_model_cpu_optimized.onnx).
+ """
+
 ##############################################
 # IMPORT LIBRARIES ###########################
 ##############################################

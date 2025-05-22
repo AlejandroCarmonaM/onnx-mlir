@@ -1,3 +1,11 @@
+# Filename: onnx_any_ep_export_bench.py
+"""
+Description:
+This script exports a PyTorch model to ONNX format without any optimizations (core ONNX ops) and
+it also exports an optimized version of the model using ONNX Runtime with an execution provider.
+Default execution provider is CPUExecutionProvider.
+"""
+
 ##############################################
 # IMPORT LIBRARIES ###########################
 ##############################################

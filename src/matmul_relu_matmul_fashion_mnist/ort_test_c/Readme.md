@@ -1,0 +1,3 @@
+This folder is a test folder to test how to invoke the onnxruntime calls using the C API,
+
+The pair of minimal_ort_version_check.c and minimal_ort_version_check_2.c do work in indicating the availability of the API. However it may not work when trying to run an op as in fused_gemm_test.c, although it may compile, as it's better to build onnxruntime instead of installing the already compiled binaries.

@@ -1,5 +1,8 @@
 #!/bin/bash
-# filepath: /path/to/script/compile_onnx.sh
+# filename: compile_onnxrt_program.sh
+# This script compiles a C or C++ source file using the ONNX Runtime library.
+# C source file example: fused_gemm_test.c
+
 
 # Check if the user provided a file name
 if [ "$#" -ne 1 ]; then
