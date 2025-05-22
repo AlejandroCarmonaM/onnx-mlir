@@ -7,7 +7,6 @@
  * The current implementation fills the output tensor with random values for testing.
  */
 
-// ...existing code...
 #include <cstdint>  // For int64_t
 #include <vector>   // Not strictly used here, but common
 // ...
@@ -112,7 +111,6 @@ inline int64_t offset1d(const int64_t* strides, int64_t i) {
    const char *onnx_node_name,
    int64_t transA,
    int64_t transB*/
-// ...existing code...
 /*    "krnl.call"(%alloc, %arg0, %0, %1) {activation = "Relu", alpha = 1.000000e+00 : f32, beta = 1.000000e+00 : f32, domain_name = "com.microsoft", funcName = "FusedGemm", numOfOutput = 1 : si64, onnx_node_name = "fused /fc1/Gemm", transA = 0 : si64, transB = 1 : si64} : (memref<1x128xf32>, memref<1x784xf32>, memref<128x784xf32>, memref<128xf32>) -> ()*/
 
 
@@ -273,8 +271,6 @@ extern "C" void FusedGemm(
   fflush(stdout); // Ensure all logs are flushed immediately
 
 }
-
-// ...existing code...
 
 // It seems it is actually working
 // as the predictions change from test to test

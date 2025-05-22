@@ -45,10 +45,6 @@ FEATURE_DIM = 784  # 28x28 flattened
 IMG_SHAPE = (1, 28, 28)
 NUM_CLASSES = 10
 
-# Benchmark configuration
-NUM_ITERATIONS = 500
-WARMUP_ITERATIONS = 100  # Number of warmup iterations
-
 # Class names for interpretation
 CLASS_NAMES = ['T-shirt/top', 'Trouser', 'Pullover', 'Dress', 'Coat',
                'Sandal', 'Shirt', 'Sneaker', 'Bag', 'Ankle boot']
@@ -162,6 +158,9 @@ if __name__ == "__main__":
             input_names=['input'],        # the model's input names
             output_names=['output']       # the model's output names
             # dynamic_axes removed to hardcode batch size based on tracing_input_fp32
+            # dynamic_axes={'input': {0: 'batch_size'}, # variable length axes
+            # 'output': {0: 'batch_size'}} (It still works with onnx-mlir lowerings, but batch size must
+            # be determined at runtime as seen in src/Conversion/ONNXToKrnl/Additional/Custom.cpp
         )
         print(f"✅ Successfully exported initial FP32 ONNX model to {ONNX_FP32_PATH}")
     except Exception as e:
