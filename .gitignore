@@ -188,6 +188,3 @@ dmypy.json
 .vscode
 .devcontainer
 .vs
-
-# RISC-V Stuff
-/src/riscv-gnu-toolchain
